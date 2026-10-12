@@ -708,7 +708,7 @@ pre,
   max-width: 420px;
 }
 
-/* Selected File Item */
+/* Selected File Item & Multi-File Queue */
 .selected-file-card {
   display: flex;
   align-items: center;
@@ -720,13 +720,54 @@ pre,
   border-radius: 10px;
 }
 
+.files-queue-box {
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.files-queue-header {
+  padding: 0.7rem 0.95rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.files-queue-list {
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  divide-y: 1px solid var(--border-subtle);
+}
+
+.file-queue-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.55rem 0.95rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.file-queue-row:last-child {
+  border-bottom: none;
+}
+
 .file-ext-badge {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   border-radius: 8px;
   background-color: var(--accent-primary-soft);
   color: var(--accent-primary);
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   font-weight: 700;
   display: flex;
   align-items: center;

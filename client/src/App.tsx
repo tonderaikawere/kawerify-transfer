@@ -6,6 +6,8 @@ import {
   Check,
   X,
   FolderOpen,
+  FolderPlus,
+  Plus,
   RefreshCw,
   FileText,
   Laptop,
@@ -15,7 +17,8 @@ import {
   Moon,
   ArrowUpRight,
   Users,
-  Hash
+  Hash,
+  Zap
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import mqtt from 'mqtt';
@@ -62,6 +65,14 @@ interface IncomingStreamState {
   startTime: number;
 }
 
+const RTC_CONFIG: RTCConfiguration = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
+  ]
+};
+
 const ADJECTIVES = ['North', 'Cobalt', 'Amber', 'Cedar', 'Lunar', 'Sol', 'Vertex', 'Quartz', 'Metro', 'Atlas', 'Prime'];
 const NOUNS = ['MacBook', 'ThinkPad', 'Workstation', 'Laptop', 'Studio', 'Desktop'];
 
@@ -88,6 +99,59 @@ function createLocalIdentity(): Peer {
   return identity;
 }
 
+// Helper to recursively extract all files from dropped folders (supports 100s/1000s of files)
+async function extractFilesFromDataTransfer(items: DataTransferItemList): Promise<File[]> {
+  const files: File[] = [];
+
+  const readEntry = async (entry: any): Promise<void> => {
+    if (!entry) return;
+    if (entry.isFile) {
+      await new Promise<void>((resolve) => {
+        entry.file((f: File) => {
+          files.push(f);
+          resolve();
+        }, () => resolve());
+      });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const readAllEntries = async (): Promise<any[]> => {
+        const batch: any[] = await new Promise((resolve) => {
+          reader.readEntries((entries: any[]) => resolve(entries || []), () => resolve([]));
+        });
+        if (batch.length > 0) {
+          const rest = await readAllEntries();
+          return batch.concat(rest);
+        }
+        return [];
+      };
+      const entries = await readAllEntries();
+      for (const child of entries) {
+        await readEntry(child);
+      }
+    }
+  };
+
+  const entries: any[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind === 'file') {
+      const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
+      if (entry) {
+        entries.push(entry);
+      } else {
+        const f = item.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+  }
+
+  for (const entry of entries) {
+    await readEntry(entry);
+  }
+
+  return files;
+}
+
 export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     const saved = localStorage.getItem('kawerify_theme');
@@ -109,23 +173,26 @@ export default function App() {
   const [localPeers, setLocalPeers] = useState<Peer[]>([]);
   const [meshPeers, setMeshPeers] = useState<Map<string, Peer>>(new Map());
   const [selectedPeerIds, setSelectedPeerIds] = useState<string[]>([]);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [ips, setIps] = useState<string[]>([]);
   const [copiedUrl, setCopiedUrl] = useState<string>('');
   const [toast, setToast] = useState<string>('');
   const [qrCodeUrl, setQrCodeUrl] = useState<string>('');
   const [incomingQueue, setIncomingQueue] = useState<IncomingOffer[]>([]);
+  const [autoAccept, setAutoAccept] = useState<boolean>(false);
   const [isDragActive, setIsDragActive] = useState<boolean>(false);
 
   const ws = useRef<WebSocket | null>(null);
   const mqttClient = useRef<mqtt.MqttClient | null>(null);
   const broadcastChan = useRef<BroadcastChannel | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const activeXhrs = useRef<Map<string, XMLHttpRequest>>(new Map());
   const canceledTransfers = useRef<Set<string>>(new Set());
   const pendingFiles = useRef<Map<string, File>>(new Map());
   const incomingBuffers = useRef<Map<string, IncomingStreamState>>(new Map());
+  const rtcPeers = useRef<Map<string, RTCPeerConnection>>(new Map());
   const meRef = useRef<Peer>(me);
   const roomRef = useRef<string>(roomCode);
 
@@ -195,7 +262,6 @@ export default function App() {
     return Array.from(map.values());
   }, [localPeers, meshPeers, me.id, roomCode]);
 
-  // Keep selectedPeerIds valid and auto-select first discovered peer if none selected
   useEffect(() => {
     setSelectedPeerIds(prev => {
       const valid = prev.filter(id => peers.some(p => p.id === id));
@@ -260,19 +326,20 @@ export default function App() {
   }, []);
 
   /**
-   * 1TB+ Capable Zero-RAM File Streamer:
-   * Uses lazy `file.slice(offset, end).arrayBuffer()` so only 64KB is ever loaded into memory at once.
+   * High-Speed Fallback Relay Streamer:
+   * Uses 4MB lazy disk reads and 256KB pipelined chunks with zero artificial delay.
    */
-  const startP2PFileStream = useCallback(async (targetId: string, fileId: string) => {
+  const startFastRelayFileStream = useCallback(async (targetId: string, fileId: string) => {
     const file = pendingFiles.current.get(fileId);
     if (!file) return;
 
     const startTime = Date.now();
-    const CHUNK_SIZE = 64 * 1024; // 64KB lazy disk slice
+    const DISK_BLOCK_SIZE = 4 * 1024 * 1024; // Read 4MB at a time from disk
+    const PACKET_SIZE = 256 * 1024; // 256KB packets (4x larger than before)
     const totalBytes = file.size;
     let offset = 0;
 
-    const pumpNextChunk = async () => {
+    const pumpBlock = async () => {
       if (canceledTransfers.current.has(fileId)) {
         canceledTransfers.current.delete(fileId);
         return;
@@ -291,34 +358,44 @@ export default function App() {
           speed: 'Done',
           eta: 'Completed'
         });
-        showToast(`Delivered ${file.name}`);
         return;
       }
 
-      const end = Math.min(offset + CHUNK_SIZE, totalBytes);
+      const blockEnd = Math.min(offset + DISK_BLOCK_SIZE, totalBytes);
       try {
-        // Read ONLY this 64KB slice from disk — keeps RAM flat (<1MB) even on a 1TB file
-        const chunkBuffer = await file.slice(offset, end).arrayBuffer();
-        const slice = new Uint8Array(chunkBuffer);
+        const blockBuffer = await file.slice(offset, blockEnd).arrayBuffer();
+        const blockBytes = new Uint8Array(blockBuffer);
 
-        let binary = '';
-        for (let i = 0; i < slice.byteLength; i++) {
-          binary += String.fromCharCode(slice[i]);
+        let localOffset = 0;
+        while (localOffset < blockBytes.byteLength) {
+          if (canceledTransfers.current.has(fileId)) return;
+          const sliceEnd = Math.min(localOffset + PACKET_SIZE, blockBytes.byteLength);
+          const slice = blockBytes.subarray(localOffset, sliceEnd);
+
+          // Fast chunked String.fromCharCode conversion using 8KB apply windows
+          let binary = '';
+          const STEP = 8192;
+          for (let i = 0; i < slice.byteLength; i += STEP) {
+            const sub = slice.subarray(i, Math.min(i + STEP, slice.byteLength));
+            binary += String.fromCharCode.apply(null, Array.from(sub));
+          }
+          const b64Chunk = btoa(binary);
+
+          sendP2PSignal(targetId, {
+            type: 'p2p-file-chunk',
+            fileId,
+            offset: offset + localOffset,
+            totalBytes,
+            fileName: file.name,
+            fileType: file.type || 'application/octet-stream',
+            chunk: b64Chunk
+          });
+
+          localOffset = sliceEnd;
         }
-        const b64Chunk = btoa(binary);
 
-        sendP2PSignal(targetId, {
-          type: 'p2p-file-chunk',
-          fileId,
-          offset,
-          totalBytes,
-          fileName: file.name,
-          fileType: file.type || 'application/octet-stream',
-          chunk: b64Chunk
-        });
-
-        offset = end;
-        const elapsed = Math.max((Date.now() - startTime) / 1000, 0.1);
+        offset = blockEnd;
+        const elapsed = Math.max((Date.now() - startTime) / 1000, 0.05);
         const progress = totalBytes > 0 ? Math.min(100, Math.round((offset / totalBytes) * 100)) : 100;
         const speedMBps = (offset / elapsed) / (1024 * 1024);
         const remainingSec = speedMBps > 0 ? ((totalBytes - offset) / (1024 * 1024)) / speedMBps : 0;
@@ -333,14 +410,160 @@ export default function App() {
               : `${(remainingSec / 3600).toFixed(1)}h left`
         });
 
-        setTimeout(pumpNextChunk, 8);
+        setTimeout(pumpBlock, 0);
       } catch {
         updateTransferStatus(fileId, 'failed', { speed: '0.00', eta: 'Read error' });
       }
     };
 
-    pumpNextChunk();
-  }, [sendP2PSignal, showToast, updateTransferStatus]);
+    pumpBlock();
+  }, [sendP2PSignal, updateTransferStatus]);
+
+  /**
+   * Turbo Direct WebRTC RTCDataChannel Binary Streamer (Saturates LAN / Wi-Fi 6 Bandwidth):
+   * Streams raw binary ArrayBuffers in 4MB disk slices with 8MB socket buffer window and automatic fallback.
+   */
+  const startTurboWebRTCStream = useCallback(async (targetId: string, fileId: string) => {
+    const file = pendingFiles.current.get(fileId);
+    if (!file) return;
+
+    // For very small files (< 512KB), instant pipelined relay has zero handshake latency
+    if (file.size <= 512 * 1024 || typeof RTCPeerConnection === 'undefined') {
+      startFastRelayFileStream(targetId, fileId);
+      return;
+    }
+
+    let fallbackTriggered = false;
+    const connKey = `${targetId}:${fileId}`;
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    rtcPeers.current.set(connKey, pc);
+
+    const dc = pc.createDataChannel(`file-${fileId}`, { ordered: true });
+    dc.binaryType = 'arraybuffer';
+    dc.bufferedAmountLowThreshold = 1024 * 1024; // 1MB low water mark
+
+    const fallbackTimer = setTimeout(() => {
+      if (dc.readyState !== 'open' && !fallbackTriggered) {
+        fallbackTriggered = true;
+        try { pc.close(); } catch { /* ignore */ }
+        rtcPeers.current.delete(connKey);
+        startFastRelayFileStream(targetId, fileId);
+      }
+    }, 2800);
+
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate) {
+        sendP2PSignal(targetId, {
+          type: 'webrtc-ice',
+          fileId,
+          candidate: ev.candidate.toJSON()
+        });
+      }
+    };
+
+    dc.onopen = async () => {
+      clearTimeout(fallbackTimer);
+      const startTime = Date.now();
+      const DISK_SLICE_SIZE = 4 * 1024 * 1024; // 4MB disk read block
+      const RTC_PACKET_SIZE = 128 * 1024; // 128KB raw binary WebRTC packet
+      const MAX_BUFFERED_AMOUNT = 8 * 1024 * 1024; // 8MB in-flight buffer
+      const totalBytes = file.size;
+      let offset = 0;
+
+      const streamLoop = async () => {
+        try {
+          while (offset < totalBytes) {
+            if (canceledTransfers.current.has(fileId)) {
+              dc.close();
+              pc.close();
+              return;
+            }
+
+            const blockEnd = Math.min(offset + DISK_SLICE_SIZE, totalBytes);
+            const blockBuf = await file.slice(offset, blockEnd).arrayBuffer();
+            let blockOffset = 0;
+
+            while (blockOffset < blockBuf.byteLength) {
+              if (dc.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+                await new Promise<void>((resolve) => {
+                  dc.onbufferedamountlow = () => {
+                    dc.onbufferedamountlow = null;
+                    resolve();
+                  };
+                  setTimeout(resolve, 40);
+                });
+              }
+
+              const pktEnd = Math.min(blockOffset + RTC_PACKET_SIZE, blockBuf.byteLength);
+              dc.send(blockBuf.slice(blockOffset, pktEnd));
+              blockOffset = pktEnd;
+            }
+
+            offset = blockEnd;
+            const elapsed = Math.max((Date.now() - startTime) / 1000, 0.05);
+            const progress = Math.min(100, Math.round((offset / totalBytes) * 100));
+            const speedMBps = (offset / elapsed) / (1024 * 1024);
+            const remainingSec = speedMBps > 0 ? ((totalBytes - offset) / (1024 * 1024)) / speedMBps : 0;
+
+            updateTransferStatus(fileId, 'uploading', {
+              progress,
+              speed: speedMBps.toFixed(2),
+              eta: remainingSec < 60
+                ? `${Math.ceil(remainingSec)}s left`
+                : remainingSec < 3600
+                  ? `${Math.floor(remainingSec / 60)}m left`
+                  : `${(remainingSec / 3600).toFixed(1)}h left`
+            });
+          }
+
+          // Wait for buffer to drain before sending EOF
+          while (dc.bufferedAmount > 0 && dc.readyState === 'open') {
+            await new Promise(r => setTimeout(r, 25));
+          }
+
+          sendP2PSignal(targetId, {
+            type: 'p2p-file-complete',
+            fileId,
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type || 'application/octet-stream'
+          });
+
+          updateTransferStatus(fileId, 'completed', {
+            progress: 100,
+            speed: 'Done',
+            eta: 'Completed'
+          });
+        } catch {
+          if (!fallbackTriggered) {
+            fallbackTriggered = true;
+            startFastRelayFileStream(targetId, fileId);
+          }
+        }
+      };
+
+      streamLoop();
+    };
+
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      sendP2PSignal(targetId, {
+        type: 'webrtc-offer',
+        fileId,
+        fileName: file.name,
+        fileSize: file.size,
+        fileType: file.type || 'application/octet-stream',
+        sdp: offer
+      });
+    } catch {
+      clearTimeout(fallbackTimer);
+      if (!fallbackTriggered) {
+        fallbackTriggered = true;
+        startFastRelayFileStream(targetId, fileId);
+      }
+    }
+  }, [sendP2PSignal, startFastRelayFileStream, updateTransferStatus]);
 
   const handleP2PMessage = useCallback(async (data: Record<string, any>) => {
     if (!data || data.senderId === meRef.current.id) return;
@@ -387,15 +610,132 @@ export default function App() {
         break;
       }
 
+      case 'p2p-transfer-offer-batch': {
+        const incomingFiles = Array.isArray(data.files) ? data.files : [];
+        setIncomingQueue(prev => {
+          const existingIds = new Set(prev.map(i => i.fileId));
+          const additions: IncomingOffer[] = [];
+          for (const f of incomingFiles) {
+            if (!existingIds.has(f.fileId)) {
+              additions.push({
+                senderId: data.senderId,
+                senderName: data.senderName,
+                fileId: f.fileId,
+                fileName: f.fileName,
+                fileSize: f.fileSize,
+                fileType: f.fileType,
+                transport: 'p2p-mesh'
+              });
+            }
+          }
+          return [...prev, ...additions];
+        });
+        break;
+      }
+
       case 'p2p-transfer-accept': {
-        startP2PFileStream(data.senderId, data.fileId);
+        startTurboWebRTCStream(data.senderId, data.fileId);
+        break;
+      }
+
+      case 'webrtc-offer': {
+        const { fileId, sdp, fileName, fileSize, fileType } = data;
+        const connKey = `${data.senderId}:${fileId}`;
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+        rtcPeers.current.set(connKey, pc);
+
+        pc.onicecandidate = (ev) => {
+          if (ev.candidate) {
+            sendP2PSignal(data.senderId, {
+              type: 'webrtc-ice',
+              fileId,
+              candidate: ev.candidate.toJSON()
+            });
+          }
+        };
+
+        pc.ondatachannel = (ev) => {
+          const channel = ev.channel;
+          channel.binaryType = 'arraybuffer';
+          channel.onmessage = async (msgEv) => {
+            if (!(msgEv.data instanceof ArrayBuffer)) return;
+            const bytes = new Uint8Array(msgEv.data);
+            let entry = incomingBuffers.current.get(fileId);
+            if (!entry) {
+              entry = {
+                chunks: [],
+                receivedBytes: 0,
+                totalSize: fileSize,
+                fileName,
+                fileType,
+                startTime: Date.now()
+              };
+              incomingBuffers.current.set(fileId, entry);
+            }
+
+            if (entry.writableStream) {
+              try {
+                await entry.writableStream.write(bytes);
+              } catch { /* ignore */ }
+            } else {
+              entry.chunks.push(bytes);
+            }
+
+            entry.receivedBytes += bytes.byteLength;
+            const progress = entry.totalSize > 0
+              ? Math.min(99, Math.round((entry.receivedBytes / entry.totalSize) * 100))
+              : 99;
+            const elapsed = Math.max((Date.now() - entry.startTime) / 1000, 0.05);
+            const speedMBps = (entry.receivedBytes / elapsed) / (1024 * 1024);
+
+            updateTransferStatus(fileId, 'downloading', {
+              progress,
+              speed: speedMBps.toFixed(2),
+              eta: 'Direct WebRTC Stream'
+            });
+          };
+        };
+
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          sendP2PSignal(data.senderId, {
+            type: 'webrtc-answer',
+            fileId,
+            sdp: answer
+          });
+        } catch {
+          // fallback handled automatically by sender timer
+        }
+        break;
+      }
+
+      case 'webrtc-answer': {
+        const connKey = `${data.senderId}:${data.fileId}`;
+        const pc = rtcPeers.current.get(connKey);
+        if (pc && data.sdp) {
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+          } catch { /* ignore */ }
+        }
+        break;
+      }
+
+      case 'webrtc-ice': {
+        const connKey = `${data.senderId}:${data.fileId}`;
+        const pc = rtcPeers.current.get(connKey);
+        if (pc && data.candidate) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+          } catch { /* ignore */ }
+        }
         break;
       }
 
       case 'p2p-transfer-cancel': {
         canceledTransfers.current.add(data.fileId);
         updateTransferStatus(data.fileId, 'failed', { speed: '0.00', eta: 'Declined' });
-        showToast('Transfer declined by peer');
         break;
       }
 
@@ -420,13 +760,10 @@ export default function App() {
           bytes[i] = binStr.charCodeAt(i);
         }
 
-        // If receiver opened a direct-to-disk FileSystemWritableFileStream (for huge / 1TB files), write straight to disk!
         if (entry.writableStream) {
           try {
             await entry.writableStream.write(bytes);
-          } catch {
-            // fallback if stream closed
-          }
+          } catch { /* ignore */ }
         } else {
           entry.chunks.push(bytes);
         }
@@ -436,7 +773,7 @@ export default function App() {
         const progress = entry.totalSize > 0
           ? Math.min(99, Math.round((entry.receivedBytes / entry.totalSize) * 100))
           : 99;
-        const elapsed = Math.max((Date.now() - entry.startTime) / 1000, 0.1);
+        const elapsed = Math.max((Date.now() - entry.startTime) / 1000, 0.05);
         const speedMBps = (entry.receivedBytes / elapsed) / (1024 * 1024);
 
         updateTransferStatus(fileId, 'downloading', {
@@ -454,28 +791,32 @@ export default function App() {
           if (entry.writableStream) {
             try {
               await entry.writableStream.close();
-            } catch {
-              // ignore
-            }
+            } catch { /* ignore */ }
           } else {
             const blob = new Blob(entry.chunks as BlobPart[], { type: fileType || 'application/octet-stream' });
             saveBlobToDeviceStorage(blob, fileName);
           }
           incomingBuffers.current.delete(fileId);
         }
+        const connKey = `${data.senderId}:${fileId}`;
+        const pc = rtcPeers.current.get(connKey);
+        if (pc) {
+          try { pc.close(); } catch { /* ignore */ }
+          rtcPeers.current.delete(connKey);
+        }
+
         updateTransferStatus(fileId, 'completed', {
           progress: 100,
           speed: 'Done',
           eta: 'Saved to disk'
         });
-        showToast(`Saved ${fileName}`);
         break;
       }
 
       default:
         break;
     }
-  }, [saveBlobToDeviceStorage, sendP2PSignal, showToast, startP2PFileStream, updateTransferStatus]);
+  }, [saveBlobToDeviceStorage, sendP2PSignal, startTurboWebRTCStream, updateTransferStatus]);
 
   useEffect(() => {
     if ('BroadcastChannel' in window) {
@@ -537,6 +878,7 @@ export default function App() {
       clearInterval(heartbeat);
       if (broadcastChan.current) broadcastChan.current.close();
       client.end(true);
+      rtcPeers.current.forEach(pc => pc.close());
     };
   }, [handleP2PMessage, sendP2PSignal]);
 
@@ -574,29 +916,34 @@ export default function App() {
                   { ...data, transport: 'local-ws' }
                 ]);
                 break;
+              case 'transfer-offer-batch': {
+                const batchFiles = Array.isArray(data.files) ? data.files : [];
+                setIncomingQueue(prev => [
+                  ...prev,
+                  ...batchFiles.map((f: any) => ({
+                    senderId: data.senderId,
+                    senderName: data.senderName,
+                    fileId: f.fileId,
+                    fileName: f.fileName,
+                    fileSize: f.fileSize,
+                    fileType: f.fileType,
+                    transport: 'local-ws' as const
+                  }))
+                ]);
+                break;
+              }
               case 'transfer-accepted':
-                updateTransferStatus(`${data.fileId}-${data.receiverId}`, 'completed', {
-                  progress: 100,
-                  speed: 'Done',
-                  eta: 'Completed'
-                });
                 updateTransferStatus(data.fileId, 'completed', {
                   progress: 100,
                   speed: 'Done',
                   eta: 'Completed'
                 });
-                showToast(`Accepted by ${data.receiverName || 'peer'}`);
                 break;
               case 'transfer-canceled':
-                updateTransferStatus(`${data.fileId}-${data.peerId}`, 'failed', {
-                  speed: '0.00',
-                  eta: 'Canceled'
-                });
                 updateTransferStatus(data.fileId, 'failed', {
                   speed: '0.00',
                   eta: 'Canceled'
                 });
-                showToast('Transfer declined by peer');
                 break;
               default:
                 break;
@@ -624,7 +971,88 @@ export default function App() {
       clearTimeout(reconnectTimer);
       if (ws.current) ws.current.close();
     };
-  }, [isLocalNetworkHost, showToast, updateTransferStatus, wsUrl]);
+  }, [isLocalNetworkHost, updateTransferStatus, wsUrl]);
+
+  const acceptSingleOffer = useCallback(async (transfer: IncomingOffer, promptDiskStream = false) => {
+    const newTransfer: Transfer = {
+      id: transfer.fileId,
+      name: transfer.fileName,
+      size: transfer.fileSize,
+      progress: transfer.transport === 'local-ws' ? 50 : 1,
+      speed: '--',
+      status: 'downloading',
+      role: 'receiver',
+      peerName: transfer.senderName,
+      eta: 'Streaming...'
+    };
+
+    setTransfers(prev => [newTransfer, ...prev]);
+
+    if (transfer.transport === 'local-ws') {
+      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        ws.current.send(JSON.stringify({
+          type: 'transfer-accept',
+          senderId: transfer.senderId,
+          fileId: transfer.fileId
+        }));
+      }
+
+      const link = document.createElement('a');
+      link.href = `${serverUrl}/api/download/${transfer.fileId}`;
+      link.setAttribute('download', transfer.fileName);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      setTimeout(() => {
+        updateTransferStatus(transfer.fileId, 'completed', {
+          progress: 100,
+          speed: 'Done',
+          eta: 'Saved'
+        });
+      }, 1500);
+    } else {
+      let writableStream: any = undefined;
+      if (promptDiskStream && 'showSaveFilePicker' in window && transfer.fileSize > 250 * 1024 * 1024) {
+        try {
+          const handle = await (window as any).showSaveFilePicker({
+            suggestedName: transfer.fileName
+          });
+          writableStream = await handle.createWritable();
+        } catch {
+          // fallback to standard download
+        }
+      }
+
+      incomingBuffers.current.set(transfer.fileId, {
+        chunks: [],
+        writableStream,
+        receivedBytes: 0,
+        totalSize: transfer.fileSize,
+        fileName: transfer.fileName,
+        fileType: transfer.fileType,
+        startTime: Date.now()
+      });
+
+      sendP2PSignal(transfer.senderId, {
+        type: 'p2p-transfer-accept',
+        fileId: transfer.fileId
+      });
+    }
+  }, [sendP2PSignal, serverUrl, updateTransferStatus]);
+
+  // If Auto-Accept is enabled, automatically accept all incoming files immediately (great for 100+ files!)
+  useEffect(() => {
+    if (autoAccept && incomingQueue.length > 0) {
+      const batch = [...incomingQueue];
+      setIncomingQueue([]);
+      batch.forEach((offer, idx) => {
+        setTimeout(() => {
+          acceptSingleOffer(offer, false);
+        }, idx * 60);
+      });
+    }
+  }, [autoAccept, incomingQueue, acceptSingleOffer]);
 
   const handleCopyLink = (linkUrl: string) => {
     navigator.clipboard.writeText(linkUrl);
@@ -673,6 +1101,11 @@ export default function App() {
     }
   };
 
+  const appendFilesToQueue = (newFiles: File[]) => {
+    if (!newFiles || newFiles.length === 0) return;
+    setSelectedFiles(prev => [...prev, ...newFiles]);
+  };
+
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -683,248 +1116,228 @@ export default function App() {
     }
   };
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setIsDragActive(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      setSelectedFile(e.dataTransfer.files[0]);
+
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      const extracted = await extractFilesFromDataTransfer(e.dataTransfer.items);
+      if (extracted.length > 0) {
+        appendFilesToQueue(extracted);
+        return;
+      }
+    }
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      appendFilesToQueue(Array.from(e.dataTransfer.files));
     }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setSelectedFile(e.target.files[0]);
+    if (e.target.files && e.target.files.length > 0) {
+      appendFilesToQueue(Array.from(e.target.files));
+      e.target.value = '';
     }
   };
 
-  const triggerFileInput = async () => {
-    if ('showOpenFilePicker' in window) {
-      try {
-        const [handle] = await (window as any).showOpenFilePicker({ multiple: false });
-        const file = await handle.getFile();
-        setSelectedFile(file);
-        return;
-      } catch (err: any) {
-        if (err?.name === 'AbortError') return;
-      }
-    }
+  const triggerFileInput = () => {
     fileInputRef.current?.click();
   };
 
+  const triggerFolderInput = () => {
+    folderInputRef.current?.click();
+  };
+
+  const removeFileAtIndex = (index: number) => {
+    setSelectedFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
   /**
-   * Broadcast file simultaneously to 1, 5, 10, or more selected devices!
+   * Broadcast 1, 100, or 1,000+ files simultaneously to 1, 5, or 10+ devices at once!
    */
-  const handleSendFile = () => {
-    if (!selectedFile || selectedPeerIds.length === 0) {
-      showToast('Select a file and at least one destination device');
+  const handleSendFiles = () => {
+    if (selectedFiles.length === 0 || selectedPeerIds.length === 0) {
+      showToast('Select files and at least one destination device');
       return;
     }
 
-    const file = selectedFile;
+    const filesToShare = [...selectedFiles];
     const targetPeers = peers.filter(p => selectedPeerIds.includes(p.id));
     if (targetPeers.length === 0) return;
 
     const localTargetPeers = targetPeers.filter(p => wsConnected && p.transport === 'local-ws');
     const p2pTargetPeers = targetPeers.filter(p => !(wsConnected && p.transport === 'local-ws'));
 
-    // 1. Handle Local Offline LAN Broadcast (1 upload -> streamed simultaneously to N local receivers)
+    // 1. High-Speed Local LAN Multi-File Pipeline (4 parallel upload workers for 100+ files)
     if (localTargetPeers.length > 0) {
-      const batchId = `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
       const peerNames = localTargetPeers.length === 1
         ? localTargetPeers[0].name
-        : `${localTargetPeers.length} devices (${localTargetPeers.map(p => p.name).join(', ')})`;
+        : `${localTargetPeers.length} devices`;
 
-      const newTransfer: Transfer = {
-        id: batchId,
-        name: file.name,
-        size: file.size,
-        progress: 0,
-        speed: '0.00',
-        status: 'uploading',
-        role: 'sender',
-        peerName: peerNames,
-        eta: 'Streaming to LAN...'
-      };
+      let cursor = 0;
+      const CONCURRENCY = 4;
 
-      setTransfers(prev => [newTransfer, ...prev]);
+      const uploadWorker = () => {
+        while (cursor < filesToShare.length) {
+          const file = filesToShare[cursor++];
+          const tempId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
-      const xhr = new XMLHttpRequest();
-      activeXhrs.current.set(batchId, xhr);
+          setTransfers(prev => [
+            {
+              id: tempId,
+              name: file.name,
+              size: file.size,
+              progress: 0,
+              speed: '0.00',
+              status: 'uploading',
+              role: 'sender',
+              peerName: peerNames,
+              eta: 'Streaming...'
+            },
+            ...prev
+          ]);
 
-      const formData = new FormData();
-      formData.append('file', file);
-      const startTime = Date.now();
+          const xhr = new XMLHttpRequest();
+          activeXhrs.current.set(tempId, xhr);
 
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable) {
-          const duration = Math.max((Date.now() - startTime) / 1000, 0.1);
-          const loaded = event.loaded;
-          const progress = Math.round((loaded / event.total) * 100);
-          const speedBps = loaded / duration;
-          const speedMBps = (speedBps / (1024 * 1024)).toFixed(2);
-          const remainingBytes = event.total - loaded;
-          const remainingSeconds = speedBps > 0 ? remainingBytes / speedBps : 0;
-          const etaText = remainingSeconds < 60
-            ? `${Math.ceil(remainingSeconds)}s left`
-            : remainingSeconds < 3600
-              ? `${Math.floor(remainingSeconds / 60)}m left`
-              : `${(remainingSeconds / 3600).toFixed(1)}h left`;
+          const formData = new FormData();
+          formData.append('file', file);
+          const startTime = Date.now();
 
-          updateTransferStatus(batchId, 'uploading', {
-            progress,
-            speed: speedMBps,
-            eta: etaText
-          });
+          xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) {
+              const duration = Math.max((Date.now() - startTime) / 1000, 0.05);
+              const loaded = event.loaded;
+              const progress = Math.round((loaded / event.total) * 100);
+              const speedBps = loaded / duration;
+              const speedMBps = (speedBps / (1024 * 1024)).toFixed(2);
+              const remainingBytes = event.total - loaded;
+              const remainingSeconds = speedBps > 0 ? remainingBytes / speedBps : 0;
+              const etaText = remainingSeconds < 60
+                ? `${Math.ceil(remainingSeconds)}s left`
+                : remainingSeconds < 3600
+                  ? `${Math.floor(remainingSeconds / 60)}m left`
+                  : `${(remainingSeconds / 3600).toFixed(1)}h left`;
+
+              updateTransferStatus(tempId, 'uploading', {
+                progress,
+                speed: speedMBps,
+                eta: etaText
+              });
+            }
+          };
+
+          xhr.onload = () => {
+            activeXhrs.current.delete(tempId);
+            if (xhr.status === 200) {
+              const response = JSON.parse(xhr.responseText);
+              setTransfers(prev => prev.map(t => t.id === tempId ? {
+                ...t,
+                id: response.fileId,
+                progress: 100,
+                status: 'waiting',
+                speed: 'Done',
+                eta: `Ready on ${localTargetPeers.length} device(s)`
+              } : t));
+
+              if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({
+                  type: 'transfer-init',
+                  targetIds: localTargetPeers.map(p => p.id),
+                  fileId: response.fileId,
+                  fileName: file.name,
+                  fileSize: file.size,
+                  fileType: file.type
+                }));
+              }
+            } else {
+              updateTransferStatus(tempId, 'failed', { speed: '0.00', eta: 'Failed' });
+            }
+            uploadWorker();
+          };
+
+          xhr.onerror = () => {
+            activeXhrs.current.delete(tempId);
+            updateTransferStatus(tempId, 'failed', { speed: '0.00', eta: 'Network error' });
+            uploadWorker();
+          };
+
+          xhr.open('POST', `${serverUrl}/api/upload?targets=${localTargetPeers.length}`);
+          xhr.send(formData);
+          return;
         }
       };
 
-      xhr.onload = () => {
-        if (xhr.status === 200) {
-          const response = JSON.parse(xhr.responseText);
-          // Remap transfer ID to server's fileId
-          setTransfers(prev => prev.map(t => t.id === batchId ? {
-            ...t,
-            id: response.fileId,
-            progress: 100,
-            status: 'waiting',
-            speed: 'Done',
-            eta: `Sent to ${localTargetPeers.length} device(s)`
-          } : t));
-
-          if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-            ws.current.send(JSON.stringify({
-              type: 'transfer-init',
-              targetIds: localTargetPeers.map(p => p.id),
-              fileId: response.fileId,
-              fileName: file.name,
-              fileSize: file.size,
-              fileType: file.type
-            }));
-          }
-        } else {
-          updateTransferStatus(batchId, 'failed', { speed: '0.00', eta: 'Failed' });
-          showToast('Upload failed');
-        }
-        activeXhrs.current.delete(batchId);
-      };
-
-      xhr.onerror = () => {
-        updateTransferStatus(batchId, 'failed', { speed: '0.00', eta: 'Network error' });
-        activeXhrs.current.delete(batchId);
-      };
-
-      xhr.open('POST', `${serverUrl}/api/upload?targets=${localTargetPeers.length}`);
-      xhr.send(formData);
+      for (let w = 0; w < Math.min(CONCURRENCY, filesToShare.length); w++) {
+        uploadWorker();
+      }
     }
 
-    // 2. Handle Direct P2P Multi-Device Broadcast (streams concurrently to 5+ devices with zero-RAM slicing)
+    // 2. Direct P2P Multi-File & Multi-Device Broadcast
     if (p2pTargetPeers.length > 0) {
       const newRows: Transfer[] = [];
-      for (const peer of p2pTargetPeers) {
-        const fileId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${peer.id.slice(-3)}`;
-        pendingFiles.current.set(fileId, file);
-        newRows.push({
-          id: fileId,
-          name: file.name,
-          size: file.size,
-          progress: 0,
-          speed: 'P2P',
-          status: 'waiting',
-          role: 'sender',
-          peerName: peer.name,
-          eta: 'Awaiting acceptance'
-        });
 
-        sendP2PSignal(peer.id, {
-          type: 'p2p-transfer-offer',
-          fileId,
-          fileName: file.name,
-          fileSize: file.size,
-          fileType: file.type || 'application/octet-stream'
-        });
+      for (const peer of p2pTargetPeers) {
+        const batchMeta: Array<{ fileId: string; fileName: string; fileSize: number; fileType: string }> = [];
+
+        for (const file of filesToShare) {
+          const fileId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${peer.id.slice(-3)}`;
+          pendingFiles.current.set(fileId, file);
+          batchMeta.push({
+            fileId,
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type || 'application/octet-stream'
+          });
+          newRows.push({
+            id: fileId,
+            name: file.name,
+            size: file.size,
+            progress: 0,
+            speed: 'Turbo P2P',
+            status: 'waiting',
+            role: 'sender',
+            peerName: peer.name,
+            eta: 'Awaiting acceptance'
+          });
+        }
+
+        // Send in compact batches of 25 offers per frame so even 500+ files transmit cleanly
+        const BATCH_STEP = 25;
+        for (let i = 0; i < batchMeta.length; i += BATCH_STEP) {
+          sendP2PSignal(peer.id, {
+            type: 'p2p-transfer-offer-batch',
+            files: batchMeta.slice(i, i + BATCH_STEP)
+          });
+        }
       }
+
       setTransfers(prev => [...newRows, ...prev]);
     }
 
-    showToast(`Sharing "${file.name}" with ${targetPeers.length} device(s)`);
-    setSelectedFile(null);
+    showToast(`Sending ${filesToShare.length} file(s) to ${targetPeers.length} device(s)`);
+    setSelectedFiles([]);
   };
 
   const incomingTransfer = incomingQueue[0] || null;
 
-  const handleAcceptTransfer = async () => {
+  const handleAcceptSingle = () => {
     if (!incomingTransfer) return;
-
-    const transfer = incomingTransfer;
+    const current = incomingTransfer;
     setIncomingQueue(prev => prev.slice(1));
+    acceptSingleOffer(current, incomingQueue.length === 1);
+  };
 
-    const newTransfer: Transfer = {
-      id: transfer.fileId,
-      name: transfer.fileName,
-      size: transfer.fileSize,
-      progress: transfer.transport === 'local-ws' ? 50 : 1,
-      speed: '--',
-      status: 'downloading',
-      role: 'receiver',
-      peerName: transfer.senderName,
-      eta: 'Streaming to disk...'
-    };
-
-    setTransfers(prev => [newTransfer, ...prev]);
-
-    if (transfer.transport === 'local-ws') {
-      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-        ws.current.send(JSON.stringify({
-          type: 'transfer-accept',
-          senderId: transfer.senderId,
-          fileId: transfer.fileId
-        }));
-      }
-
-      const link = document.createElement('a');
-      link.href = `${serverUrl}/api/download/${transfer.fileId}`;
-      link.setAttribute('download', transfer.fileName);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-
+  const handleAcceptAllIncoming = () => {
+    const all = [...incomingQueue];
+    setIncomingQueue([]);
+    all.forEach((offer, idx) => {
       setTimeout(() => {
-        updateTransferStatus(transfer.fileId, 'completed', {
-          progress: 100,
-          speed: 'Done',
-          eta: 'Saved'
-        });
-      }, 2000);
-    } else {
-      // For huge files (or when File System Access API is available), offer direct-to-disk streaming so 1TB files use 0MB RAM
-      let writableStream: any = undefined;
-      if ('showSaveFilePicker' in window && transfer.fileSize > 100 * 1024 * 1024) {
-        try {
-          const handle = await (window as any).showSaveFilePicker({
-            suggestedName: transfer.fileName
-          });
-          writableStream = await handle.createWritable();
-        } catch {
-          // fallback to standard download
-        }
-      }
-
-      incomingBuffers.current.set(transfer.fileId, {
-        chunks: [],
-        writableStream,
-        receivedBytes: 0,
-        totalSize: transfer.fileSize,
-        fileName: transfer.fileName,
-        fileType: transfer.fileType,
-        startTime: Date.now()
-      });
-
-      sendP2PSignal(transfer.senderId, {
-        type: 'p2p-transfer-accept',
-        fileId: transfer.fileId
-      });
-    }
+        acceptSingleOffer(offer, false);
+      }, idx * 50);
+    });
+    showToast(`Accepted all ${all.length} incoming files`);
   };
 
   const handleRejectTransfer = () => {
@@ -945,6 +1358,27 @@ export default function App() {
         type: 'p2p-transfer-cancel',
         fileId: transfer.fileId
       });
+    }
+  };
+
+  const handleRejectAllIncoming = () => {
+    const all = [...incomingQueue];
+    setIncomingQueue([]);
+    for (const transfer of all) {
+      if (transfer.transport === 'local-ws') {
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+          ws.current.send(JSON.stringify({
+            type: 'transfer-cancel',
+            targetId: transfer.senderId,
+            fileId: transfer.fileId
+          }));
+        }
+      } else {
+        sendP2PSignal(transfer.senderId, {
+          type: 'p2p-transfer-cancel',
+          fileId: transfer.fileId
+        });
+      }
     }
   };
 
@@ -985,6 +1419,7 @@ export default function App() {
 
   const isSystemOnline = wsConnected || p2pConnected;
   const selectedPeersList = peers.filter(p => selectedPeerIds.includes(p.id));
+  const totalSelectedBytes = selectedFiles.reduce((acc, f) => acc + f.size, 0);
 
   return (
     <div className="shell">
@@ -997,7 +1432,7 @@ export default function App() {
             <div className="brand-mark">K</div>
             <div className="brand-text">
               <span className="brand-name">Kawerify Transfer</span>
-              <span className="brand-byline">Multi-Device Local & P2P File Sharing</span>
+              <span className="brand-byline">Multi-Device Local & WebRTC File Sharing</span>
             </div>
           </a>
 
@@ -1008,7 +1443,7 @@ export default function App() {
                 {wsConnected
                   ? 'Offline LAN Ready'
                   : p2pConnected
-                    ? 'Direct P2P Ready'
+                    ? 'Turbo WebRTC Ready'
                     : 'Connecting...'}
               </span>
             </div>
@@ -1122,7 +1557,7 @@ export default function App() {
                     <div className="qr-info">
                       <h4>Phone or Tablet QR</h4>
                       <p>
-                        Scan with a phone camera, or simply open the link on another laptop to connect without scanning.
+                        Scan with a phone camera, or open the link on another laptop to connect without scanning.
                       </p>
                     </div>
                   </div>
@@ -1166,7 +1601,7 @@ export default function App() {
               {peers.length > 0 ? (
                 <>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.65rem' }}>
-                    Tap one or multiple devices (5+ supported) to broadcast the same file simultaneously:
+                    Select 1, 5, or all devices below to broadcast files simultaneously:
                   </div>
                   <div className="peers-grid">
                     {peers.map((peer) => {
@@ -1189,7 +1624,7 @@ export default function App() {
                               <div className="peer-card-meta">
                                 <span>{peer.deviceType || 'Laptop / Desktop'}</span>
                                 <span>•</span>
-                                <span>{peer.transport === 'local-ws' ? 'Offline LAN' : 'Direct P2P'}</span>
+                                <span>{peer.transport === 'local-ws' ? 'Offline LAN' : 'Turbo WebRTC'}</span>
                               </div>
                             </div>
                           </div>
@@ -1218,25 +1653,41 @@ export default function App() {
           </section>
         </div>
 
-        {/* Right Column: File Selection & Multi-Stream Transfers */}
+        {/* Right Column: Unlimited Multi-File Selection & High-Speed Transfers */}
         <div className="column">
           <section className="card">
             <div className="card-header">
               <div className="card-title-group">
-                <span className="card-title">Send File</span>
+                <span className="card-title">Send Files & Folders</span>
+                {selectedFiles.length > 0 && (
+                  <span className="transport-tag mono">{selectedFiles.length} files</span>
+                )}
               </div>
-              <span className="card-subtitle mono">Supports 1TB+ Zero-RAM Stream</span>
+              <span className="card-subtitle mono" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                <Zap size={13} style={{ color: 'var(--accent-primary)' }} /> Unlimited Files • 1TB+ Stream
+              </span>
             </div>
 
             <div className="card-body">
+              {/* Multi-file input (100, 1000+ files) */}
               <input
                 type="file"
+                multiple
                 ref={fileInputRef}
                 style={{ display: 'none' }}
                 onChange={handleFileChange}
               />
+              {/* Folder input (recursive directory upload) */}
+              <input
+                type="file"
+                multiple
+                {...({ webkitdirectory: '', directory: '' } as any)}
+                ref={folderInputRef}
+                style={{ display: 'none' }}
+                onChange={handleFileChange}
+              />
 
-              {!selectedFile ? (
+              {selectedFiles.length === 0 ? (
                 <div
                   className={`dropzone ${isDragActive ? 'active' : ''}`}
                   onDragEnter={handleDrag}
@@ -1248,33 +1699,83 @@ export default function App() {
                   <div className="dropzone-icon">
                     <FolderOpen size={20} />
                   </div>
-                  <div className="dropzone-title">Choose a file or drag it here</div>
+                  <div className="dropzone-title">Select 100+ files, folders, or drag & drop here</div>
                   <div className="dropzone-hint">
-                    Stream any file size (from documents to 1TB+ video archives) directly from device storage to multiple devices at once
+                    No cap on file count or file size—stream hundreds of files or 1TB+ archives at full hardware speed
+                  </div>
+                  <div
+                    style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap', justifyContent: 'center' }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <button className="btn btn-secondary btn-sm" onClick={triggerFileInput}>
+                      <Plus size={14} /> Select Files
+                    </button>
+                    <button className="btn btn-secondary btn-sm" onClick={triggerFolderInput}>
+                      <FolderPlus size={14} /> Select Entire Folder
+                    </button>
                   </div>
                 </div>
               ) : (
-                <div className="selected-file-card">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0 }}>
-                    <div className="file-ext-badge mono">
-                      {getFileExtension(selectedFile.name)}
+                <div className="files-queue-box">
+                  <div className="files-queue-header">
+                    <div>
+                      <div style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                        {selectedFiles.length} {selectedFiles.length === 1 ? 'file' : 'files'} queued
+                      </div>
+                      <div className="card-subtitle mono">
+                        Total size: {formatBytes(totalSelectedBytes)}
+                      </div>
                     </div>
-                    <div style={{ minWidth: 0 }}>
-                      <div className="transfer-filename" title={selectedFile.name}>
-                        {selectedFile.name}
-                      </div>
-                      <div className="card-subtitle mono" style={{ marginTop: '0.1rem' }}>
-                        {formatBytes(selectedFile.size)} • Ready for chunked disk stream
-                      </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                      <button className="btn btn-secondary btn-sm" onClick={triggerFileInput}>
+                        <Plus size={13} /> Add Files
+                      </button>
+                      <button className="btn btn-secondary btn-sm" onClick={triggerFolderInput}>
+                        <FolderPlus size={13} /> Add Folder
+                      </button>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => setSelectedFiles([])}
+                        style={{ color: 'var(--status-danger)' }}
+                      >
+                        Clear All
+                      </button>
                     </div>
                   </div>
-                  <button
-                    className="icon-btn"
-                    onClick={() => setSelectedFile(null)}
-                    title="Remove file"
-                  >
-                    <X size={15} />
-                  </button>
+
+                  <div className="files-queue-list">
+                    {selectedFiles.slice(0, 150).map((file, idx) => (
+                      <div key={`${file.name}-${idx}`} className="file-queue-row">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', minWidth: 0, flex: 1 }}>
+                          <div className="file-ext-badge mono">
+                            {getFileExtension(file.name)}
+                          </div>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div className="transfer-filename" title={file.name}>
+                              {file.name}
+                            </div>
+                            <div className="card-subtitle mono">
+                              {formatBytes(file.size)}
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          className="icon-btn"
+                          style={{ width: 28, height: 28 }}
+                          onClick={() => removeFileAtIndex(idx)}
+                          title="Remove from queue"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ))}
+                    {selectedFiles.length > 150 && (
+                      <div className="file-queue-row" style={{ justifyContent: 'center', color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
+                        + {selectedFiles.length - 150} additional files ready in batch
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -1319,28 +1820,22 @@ export default function App() {
 
               <div className="send-bar">
                 <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-                  {selectedPeersList.length > 1
-                    ? `Simultaneous broadcast to ${selectedPeersList.length} devices`
-                    : selectedPeersList.length === 1
-                      ? `Direct stream to ${selectedPeersList[0].name}`
-                      : 'Waiting for recipient selection'}
+                  {selectedFiles.length > 0 && selectedPeersList.length > 0
+                    ? `Ready to send ${selectedFiles.length} file(s) to ${selectedPeersList.length} device(s)`
+                    : 'Select files and recipient devices to start'}
                 </div>
 
                 <div className="send-actions">
-                  {selectedFile && (
-                    <button className="btn btn-secondary" onClick={triggerFileInput}>
-                      Change File
-                    </button>
-                  )}
                   <button
                     className="btn btn-primary"
-                    onClick={handleSendFile}
-                    disabled={!selectedFile || selectedPeersList.length === 0}
+                    onClick={handleSendFiles}
+                    disabled={selectedFiles.length === 0 || selectedPeersList.length === 0}
                   >
                     <Send size={15} />
-                    {selectedPeersList.length > 1
-                      ? `Share to ${selectedPeersList.length} Devices`
+                    {selectedFiles.length > 1
+                      ? `Send ${selectedFiles.length} Files`
                       : 'Send File'}
+                    {selectedPeersList.length > 1 ? ` to ${selectedPeersList.length} Devices` : ''}
                   </button>
                 </div>
               </div>
@@ -1355,19 +1850,43 @@ export default function App() {
                   <span className="transport-tag mono">{transfers.length}</span>
                 )}
               </div>
-              {transfers.some(t => t.status === 'completed' || t.status === 'failed') && (
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => setTransfers(prev => prev.filter(t => t.status !== 'completed' && t.status !== 'failed'))}
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <label
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.35rem',
+                    fontSize: '0.75rem',
+                    color: 'var(--text-secondary)',
+                    cursor: 'pointer',
+                    userSelect: 'none'
+                  }}
+                  title="Automatically accept incoming multi-file batches without prompts"
                 >
-                  Clear finished
-                </button>
-              )}
+                  <input
+                    type="checkbox"
+                    checked={autoAccept}
+                    onChange={(e) => setAutoAccept(e.target.checked)}
+                    style={{ accentColor: 'var(--accent-primary)' }}
+                  />
+                  Auto-accept incoming
+                </label>
+
+                {transfers.some(t => t.status === 'completed' || t.status === 'failed') && (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setTransfers(prev => prev.filter(t => t.status !== 'completed' && t.status !== 'failed'))}
+                  >
+                    Clear finished
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="card-body">
               {transfers.length > 0 ? (
-                <div className="transfer-list">
+                <div className="transfer-list" style={{ maxHeight: '420px', overflowY: 'auto' }}>
                   {transfers.map((transfer) => (
                     <div
                       key={transfer.id}
@@ -1416,7 +1935,7 @@ export default function App() {
                       <div className="transfer-meta-row mono">
                         <span>{formatBytes(transfer.size)} • {transfer.peerName}</span>
                         <span>
-                          {transfer.speed !== 'Done' && transfer.speed !== '--' && transfer.speed !== 'P2P'
+                          {transfer.speed !== 'Done' && transfer.speed !== '--' && transfer.speed !== 'Turbo P2P'
                             ? `${transfer.speed} MB/s • `
                             : ''}
                           {transfer.eta}
@@ -1435,7 +1954,7 @@ export default function App() {
         </div>
       </main>
 
-      {/* Incoming Transfer Modal */}
+      {/* Incoming Transfer Modal (Supports Single or 100+ Batch Accept) */}
       {incomingTransfer && (
         <div className="modal-backdrop">
           <div className="modal-card">
@@ -1445,12 +1964,16 @@ export default function App() {
                   <Download size={18} />
                 </div>
                 <div>
-                  <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>Incoming File</div>
+                  <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>
+                    {incomingQueue.length > 1
+                      ? `Incoming Batch (${incomingQueue.length} Files)`
+                      : 'Incoming File'}
+                  </div>
                   <div className="card-subtitle">From {incomingTransfer.senderName}</div>
                 </div>
               </div>
               {incomingQueue.length > 1 && (
-                <span className="transport-tag mono">+{incomingQueue.length - 1} more</span>
+                <span className="transport-tag mono">{incomingQueue.length} queued</span>
               )}
             </div>
 
@@ -1465,18 +1988,37 @@ export default function App() {
                   </div>
                   <div className="card-subtitle mono">
                     {formatBytes(incomingTransfer.fileSize)}
+                    {incomingQueue.length > 1
+                      ? ` • +${incomingQueue.length - 1} more file(s)`
+                      : ''}
                   </div>
                 </div>
               </div>
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
-              <button className="btn btn-secondary" onClick={handleRejectTransfer}>
-                Decline
-              </button>
-              <button className="btn btn-primary" onClick={handleAcceptTransfer}>
-                Accept & Save
-              </button>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {incomingQueue.length > 1 ? (
+                <>
+                  <button className="btn btn-secondary" onClick={handleRejectAllIncoming}>
+                    Decline All
+                  </button>
+                  <button className="btn btn-secondary" onClick={handleAcceptSingle}>
+                    Accept This One
+                  </button>
+                  <button className="btn btn-primary" onClick={handleAcceptAllIncoming}>
+                    Accept All ({incomingQueue.length})
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button className="btn btn-secondary" onClick={handleRejectTransfer}>
+                    Decline
+                  </button>
+                  <button className="btn btn-primary" onClick={handleAcceptSingle}>
+                    Accept & Save
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

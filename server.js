@@ -15,13 +15,16 @@ const PORT = process.env.PORT || 5000;
 const app = express();
 const server = createServer(app);
 
-// Disable server timeouts so multi-terabyte (1TB+) streams never time out
+// Disable all timeouts and enable TCP NoDelay for maximum throughput on 1TB+ and 100+ file streams
 server.timeout = 0;
 server.keepAliveTimeout = 0;
 server.requestTimeout = 0;
+server.on('connection', (socket) => {
+  socket.setNoDelay(true);
+});
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '100mb' }));
 
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) {
@@ -38,10 +41,14 @@ const storage = multer.diskStorage({
   }
 });
 
-// Unlimited file size (supports 1TB+ files streamed directly to disk)
+// Unlimited file size (1TB+) and unlimited file count (100, 1000+ files at once)
 const upload = multer({
   storage,
-  limits: { fileSize: Infinity }
+  limits: {
+    fileSize: Infinity,
+    files: Infinity,
+    fieldSize: Infinity
+  }
 });
 
 // Map: fileId -> { id, name, size, type, path, remainingDownloads, createdAt }
@@ -64,33 +71,47 @@ app.get('/api/ips', (_req, res) => {
   res.json({ ips: getLocalIPs(), port: PORT });
 });
 
-app.post('/api/upload', upload.single('file'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
+// Single or Multi-file high-speed streaming upload
+app.post('/api/upload', upload.any(), (req, res) => {
+  const uploadedFiles = req.files || (req.file ? [req.file] : []);
+  if (!uploadedFiles || uploadedFiles.length === 0) {
+    return res.status(400).json({ error: 'No files uploaded' });
   }
 
-  const filename = req.file.filename;
-  const fileId = filename.substring(0, filename.indexOf('-', filename.indexOf('-') + 1));
   const targetCount = Math.max(1, parseInt(req.query.targets || '1', 10));
+  const results = [];
 
-  const fileData = {
-    id: fileId,
-    name: req.file.originalname,
-    size: req.file.size,
-    type: req.file.mimetype || 'application/octet-stream',
-    path: req.file.path,
-    remainingDownloads: targetCount,
-    createdAt: Date.now()
-  };
+  for (const f of uploadedFiles) {
+    const filename = f.filename;
+    const fileId = filename.substring(0, filename.indexOf('-', filename.indexOf('-') + 1));
 
-  activeTransfers.set(fileId, fileData);
+    const fileData = {
+      id: fileId,
+      name: f.originalname,
+      size: f.size,
+      type: f.mimetype || 'application/octet-stream',
+      path: f.path,
+      remainingDownloads: targetCount,
+      createdAt: Date.now()
+    };
+
+    activeTransfers.set(fileId, fileData);
+    results.push({
+      fileId,
+      downloadUrl: `/api/download/${fileId}`,
+      name: fileData.name,
+      size: fileData.size,
+      type: fileData.type
+    });
+  }
 
   res.json({
     success: true,
-    fileId,
-    downloadUrl: `/api/download/${fileId}`,
-    name: fileData.name,
-    size: fileData.size
+    fileId: results[0].fileId,
+    downloadUrl: results[0].downloadUrl,
+    name: results[0].name,
+    size: results[0].size,
+    files: results
   });
 });
 
@@ -107,8 +128,8 @@ app.get('/api/download/:fileId', (req, res) => {
   res.setHeader('Content-Type', fileData.type);
   res.setHeader('Content-Length', fileData.size);
 
-  // Use 1MB highWaterMark chunks for maximum LAN throughput on multi-gigabyte / 1TB files
-  const fileStream = fs.createReadStream(fileData.path, { highWaterMark: 1024 * 1024 });
+  // 4MB highWaterMark buffer for maximum sequential disk-to-socket throughput
+  const fileStream = fs.createReadStream(fileData.path, { highWaterMark: 4 * 1024 * 1024 });
   fileStream.pipe(res);
 
   res.on('finish', () => {
@@ -123,7 +144,7 @@ app.get('/api/download/:fileId', (req, res) => {
           console.error(`Error deleting file ${fileData.name}:`, err);
         }
         activeTransfers.delete(fileId);
-      }, 10000);
+      }, 15000);
     }
   });
 });
@@ -139,7 +160,7 @@ app.get('*', (_req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, maxPayload: 64 * 1024 * 1024 });
 const peers = new Map();
 
 const ADJECTIVES = ['North', 'Cobalt', 'Amber', 'Cedar', 'Lunar', 'Sol', 'Vertex', 'Quartz', 'Metro', 'Atlas', 'Prime'];
@@ -190,7 +211,6 @@ wss.on('connection', (ws) => {
           break;
 
         case 'transfer-init': {
-          // Support single targetId OR array of targetIds (for sharing to 5+ devices at once)
           const targets = Array.isArray(data.targetIds)
             ? data.targetIds
             : data.targetId
@@ -208,6 +228,23 @@ wss.on('connection', (ws) => {
                 fileName: data.fileName,
                 fileSize: data.fileSize,
                 fileType: data.fileType
+              }));
+            }
+          }
+          break;
+        }
+
+        case 'transfer-init-batch': {
+          const targets = Array.isArray(data.targetIds) ? data.targetIds : [];
+          const files = Array.isArray(data.files) ? data.files : [];
+          for (const tid of targets) {
+            if (peers.has(tid)) {
+              const target = peers.get(tid);
+              target.ws.send(JSON.stringify({
+                type: 'transfer-offer-batch',
+                senderId: peerId,
+                senderName: peerState.name,
+                files
               }));
             }
           }
