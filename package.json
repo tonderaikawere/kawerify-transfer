@@ -2,11 +2,12 @@
   "name": "kawerify-transfer-server",
   "version": "1.0.0",
   "type": "module",
-  "description": "High-performance offline file-sharing server developed by Kawerify Tech",
+  "description": "High-performance offline and P2P file-sharing platform developed by Kawerify Tech",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "build": "npm --prefix client install && npm --prefix client run build"
   },
   "keywords": [
     "file-transfer",
