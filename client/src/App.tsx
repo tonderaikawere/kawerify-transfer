@@ -2,18 +2,18 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Send,
   Download,
-  Share2,
   Copy,
   Check,
   X,
   FolderOpen,
   RefreshCw,
   FileText,
-  User,
-  Users,
-  Wifi,
-  HardDrive,
-  ShieldCheck
+  Laptop,
+  Smartphone,
+  Radio,
+  Sun,
+  Moon,
+  ArrowUpRight
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import mqtt from 'mqtt';
@@ -49,8 +49,8 @@ interface IncomingOffer {
   transport: 'local-ws' | 'p2p-mesh';
 }
 
-const ADJECTIVES = ['Swift', 'Silent', 'Hyper', 'Turbo', 'Ninja', 'Cosmic', 'Solar', 'Quantum', 'Nebula', 'Echo', 'Frost', 'Wild'];
-const ANIMALS = ['Cheetah', 'Falcon', 'Panther', 'Shark', 'Eagle', 'Wolf', 'Leopard', 'Hawk', 'Badger', 'Tiger', 'Viper', 'Lynx'];
+const ADJECTIVES = ['North', 'Cobalt', 'Amber', 'Cedar', 'Lunar', 'Sol', 'Vertex', 'studio', 'Quartz', 'Metro', 'Atlas', 'Prime'];
+const NOUNS = ['MacBook', 'ThinkPad', 'Workstation', 'Phone', 'Studio', 'Node', 'Terminal', 'Surface', 'Pixel', 'Device'];
 
 function createLocalIdentity(): Peer {
   const saved = sessionStorage.getItem('kawerify_peer_identity');
@@ -61,14 +61,14 @@ function createLocalIdentity(): Peer {
       // ignore invalid cache
     }
   }
-  const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-  const animal = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
-  const num = Math.floor(Math.random() * 900) + 100;
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+  const noun = isMobile ? 'Mobile' : NOUNS[Math.floor(Math.random() * 3)];
+  const num = Math.floor(Math.random() * 90) + 10;
   const identity: Peer = {
     id: `peer-${Math.random().toString(36).substring(2, 9)}`,
-    name: `${adj} ${animal} ${num}`,
-    avatar: Math.floor(Math.random() * 8) + 1,
+    name: `${adj} ${noun}-${num}`,
+    avatar: isMobile ? 2 : 1,
     deviceType: isMobile ? 'Mobile Phone' : 'Laptop / Desktop'
   };
   sessionStorage.setItem('kawerify_peer_identity', JSON.stringify(identity));
@@ -76,6 +76,10 @@ function createLocalIdentity(): Peer {
 }
 
 export default function App() {
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    const saved = localStorage.getItem('kawerify_theme');
+    return saved === 'light' ? 'light' : 'dark';
+  });
   const [me, setMe] = useState<Peer>(() => createLocalIdentity());
   const [customName, setCustomName] = useState<string>(() => createLocalIdentity().name);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
@@ -86,6 +90,7 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [ips, setIps] = useState<string[]>([]);
+  const [copiedUrl, setCopiedUrl] = useState<string>('');
   const [toast, setToast] = useState<string>('');
   const [qrCodeUrl, setQrCodeUrl] = useState<string>('');
   const [incomingTransfer, setIncomingTransfer] = useState<IncomingOffer | null>(null);
@@ -98,8 +103,12 @@ export default function App() {
   const activeXhrs = useRef<Map<string, XMLHttpRequest>>(new Map());
   const pendingFiles = useRef<Map<string, File>>(new Map());
   const incomingBuffers = useRef<Map<string, { chunks: Uint8Array[]; receivedBytes: number; totalSize: number; fileName: string; fileType: string; startTime: number }>>(new Map());
-  const rtcConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
   const meRef = useRef<Peer>(me);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('kawerify_theme', theme);
+  }, [theme]);
 
   useEffect(() => {
     meRef.current = me;
@@ -121,7 +130,7 @@ export default function App() {
 
   const showToast = useCallback((message: string) => {
     setToast(message);
-    setTimeout(() => setToast(''), 3200);
+    setTimeout(() => setToast(''), 3000);
   }, []);
 
   const updateTransferStatus = useCallback((
@@ -133,7 +142,6 @@ export default function App() {
   }, []);
 
   const saveBlobToDeviceStorage = useCallback(async (blob: Blob, fileName: string) => {
-    // Use File System Access API if user triggers it or fallback to direct anchor download
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -144,7 +152,6 @@ export default function App() {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   }, []);
 
-  // Combined peer list (deduplicated)
   const peers: Peer[] = React.useMemo(() => {
     const map = new Map<string, Peer>();
     for (const p of meshPeers.values()) {
@@ -160,7 +167,6 @@ export default function App() {
     return Array.from(map.values());
   }, [localPeers, meshPeers, me.id]);
 
-  // Auto-select first peer if none selected
   useEffect(() => {
     if (!selectedPeerId && peers.length > 0) {
       setSelectedPeerId(peers[0].id);
@@ -169,7 +175,6 @@ export default function App() {
     }
   }, [peers, selectedPeerId]);
 
-  // Generate QR Code and connection URLs
   useEffect(() => {
     const shareOrigin = window.location.origin;
     if (isLocalNetworkHost) {
@@ -179,19 +184,18 @@ export default function App() {
           const validIps: string[] = data.ips || [];
           setIps(validIps.map((ip: string) => `http://${ip}:${data.port || 5000}`));
           const targetUrl = validIps.length > 0 ? `http://${validIps[0]}:${data.port || 5000}` : shareOrigin;
-          QRCode.toDataURL(targetUrl).then(setQrCodeUrl).catch(() => {});
+          QRCode.toDataURL(targetUrl, { margin: 1, width: 180 }).then(setQrCodeUrl).catch(() => {});
         })
         .catch(() => {
           setIps([shareOrigin]);
-          QRCode.toDataURL(shareOrigin).then(setQrCodeUrl).catch(() => {});
+          QRCode.toDataURL(shareOrigin, { margin: 1, width: 180 }).then(setQrCodeUrl).catch(() => {});
         });
     } else {
       setIps([shareOrigin]);
-      QRCode.toDataURL(shareOrigin).then(setQrCodeUrl).catch(() => {});
+      QRCode.toDataURL(shareOrigin, { margin: 1, width: 180 }).then(setQrCodeUrl).catch(() => {});
     }
   }, [isLocalNetworkHost, serverUrl]);
 
-  // Send P2P signaling message via MQTT + BroadcastChannel
   const sendP2PSignal = useCallback((targetId: string | 'broadcast', payload: Record<string, unknown>) => {
     const envelope = {
       ...payload,
@@ -218,18 +222,15 @@ export default function App() {
     }
   }, []);
 
-  // Stream file chunks over WebRTC DataChannel or P2P Direct Relay
   const startP2PFileStream = useCallback(async (targetId: string, fileId: string) => {
     const file = pendingFiles.current.get(fileId);
     if (!file) return;
 
     const startTime = Date.now();
-    const CHUNK_SIZE = 48 * 1024; // 48KB binary chunks
+    const CHUNK_SIZE = 48 * 1024;
     const buffer = await file.arrayBuffer();
     const uint8 = new Uint8Array(buffer);
     const totalBytes = uint8.byteLength;
-
-    // Attempt WebRTC DataChannel or direct fast chunked signaling stream
     let offset = 0;
 
     const sendNextBatch = () => {
@@ -246,7 +247,7 @@ export default function App() {
           speed: 'Done',
           eta: 'Completed'
         });
-        showToast('File transfer completed!');
+        showToast('Transfer completed');
         pendingFiles.current.delete(fileId);
         return;
       }
@@ -254,7 +255,6 @@ export default function App() {
       const end = Math.min(offset + CHUNK_SIZE, totalBytes);
       const slice = uint8.subarray(offset, end);
 
-      // Encode slice to base64 for universal transport reliability
       let binary = '';
       for (let i = 0; i < slice.byteLength; i++) {
         binary += String.fromCharCode(slice[i]);
@@ -280,7 +280,7 @@ export default function App() {
       updateTransferStatus(fileId, 'uploading', {
         progress,
         speed: speedMBps.toFixed(2),
-        eta: remainingSec < 60 ? `${Math.ceil(remainingSec)}s remaining` : `${Math.floor(remainingSec / 60)}m remaining`
+        eta: remainingSec < 60 ? `${Math.ceil(remainingSec)}s left` : `${Math.floor(remainingSec / 60)}m left`
       });
 
       setTimeout(sendNextBatch, 12);
@@ -289,7 +289,6 @@ export default function App() {
     sendNextBatch();
   }, [sendP2PSignal, showToast, updateTransferStatus]);
 
-  // Handle incoming P2P signals
   const handleP2PMessage = useCallback((data: Record<string, any>) => {
     if (!data || data.senderId === meRef.current.id) return;
 
@@ -301,7 +300,7 @@ export default function App() {
             id: data.senderId,
             name: data.senderName || 'Nearby Device',
             avatar: data.senderAvatar || 1,
-            deviceType: data.senderDevice || 'Device',
+            deviceType: data.senderDevice || 'Laptop / Desktop',
             lastSeen: Date.now(),
             transport: 'p2p-mesh'
           });
@@ -335,7 +334,7 @@ export default function App() {
 
       case 'p2p-transfer-cancel': {
         updateTransferStatus(data.fileId, 'failed', { speed: '0.00', eta: 'Declined' });
-        showToast('Transfer declined by remote peer.');
+        showToast('Transfer declined by peer');
         break;
       }
 
@@ -384,10 +383,10 @@ export default function App() {
         }
         updateTransferStatus(fileId, 'completed', {
           progress: 100,
-          speed: 'Success',
-          eta: 'Saved to device'
+          speed: 'Done',
+          eta: 'Saved'
         });
-        showToast(`Saved ${fileName} to device!`);
+        showToast(`Saved ${fileName}`);
         break;
       }
 
@@ -396,9 +395,7 @@ export default function App() {
     }
   }, [saveBlobToDeviceStorage, sendP2PSignal, showToast, startP2PFileStream, updateTransferStatus]);
 
-  // Setup P2P Discovery & WebRTC Signaling Mesh (works on Vercel & across tabs/devices)
   useEffect(() => {
-    // 1. Same-device / local browser BroadcastChannel
     if ('BroadcastChannel' in window) {
       const bc = new BroadcastChannel('kawerify_transfer_mesh_v2');
       broadcastChan.current = bc;
@@ -410,7 +407,6 @@ export default function App() {
       };
     }
 
-    // 2. Real-time WSS P2P discovery & signaling
     const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
       clientId: `kawerify_${meRef.current.id}_${Math.random().toString(16).slice(2, 6)}`,
       clean: true,
@@ -439,7 +435,6 @@ export default function App() {
     client.on('close', () => setP2pConnected(false));
     client.on('error', () => setP2pConnected(false));
 
-    // Heartbeat & stale peer cleanup
     const heartbeat = setInterval(() => {
       sendP2PSignal('broadcast', { type: 'presence' });
       const now = Date.now();
@@ -460,11 +455,9 @@ export default function App() {
       clearInterval(heartbeat);
       if (broadcastChan.current) broadcastChan.current.close();
       client.end(true);
-      rtcConnections.current.forEach(pc => pc.close());
     };
   }, [handleP2PMessage, sendP2PSignal]);
 
-  // Connect Local Offline WebSocket Server (when running on local network)
   useEffect(() => {
     if (!isLocalNetworkHost) return;
 
@@ -485,35 +478,27 @@ export default function App() {
               case 'welcome':
                 setMe(prev => ({ ...prev, id: data.peer.id }));
                 break;
-
               case 'peers-update':
                 setLocalPeers(data.peers || []);
                 break;
-
               case 'transfer-offer':
-                setIncomingTransfer({
-                  ...data,
-                  transport: 'local-ws'
-                });
+                setIncomingTransfer({ ...data, transport: 'local-ws' });
                 break;
-
               case 'transfer-accepted':
                 updateTransferStatus(data.fileId, 'completed', {
                   progress: 100,
                   speed: 'Done',
                   eta: 'Completed'
                 });
-                showToast('File transfer completed!');
+                showToast('Transfer completed');
                 break;
-
               case 'transfer-canceled':
                 updateTransferStatus(data.fileId, 'failed', {
                   speed: '0.00',
                   eta: 'Canceled'
                 });
-                showToast('Transfer canceled by remote peer.');
+                showToast('Transfer canceled');
                 break;
-
               default:
                 break;
             }
@@ -544,18 +529,19 @@ export default function App() {
 
   const handleCopyLink = (linkUrl: string) => {
     navigator.clipboard.writeText(linkUrl);
-    showToast(`Link copied: ${linkUrl}`);
+    setCopiedUrl(linkUrl);
+    setTimeout(() => setCopiedUrl(''), 2000);
   };
 
   const handleRename = () => {
     const trimmed = customName.trim().substring(0, 24);
-    if (!trimmed) return;
+    if (!trimmed || trimmed === me.name) return;
     setMe(prev => ({ ...prev, name: trimmed }));
     if (ws.current && ws.current.readyState === WebSocket.OPEN) {
       ws.current.send(JSON.stringify({ type: 'rename', name: trimmed }));
     }
     sendP2PSignal('broadcast', { type: 'presence', senderName: trimmed });
-    showToast('Device name updated!');
+    showToast('Device name saved');
   };
 
   const handleDrag = (e: React.DragEvent) => {
@@ -584,7 +570,6 @@ export default function App() {
   };
 
   const triggerFileInput = async () => {
-    // Support modern File System Access API on desktop browsers with fallback to standard input
     if ('showOpenFilePicker' in window) {
       try {
         const [handle] = await (window as any).showOpenFilePicker({ multiple: false });
@@ -598,13 +583,9 @@ export default function App() {
     fileInputRef.current?.click();
   };
 
-  const clearSelectedFile = () => {
-    setSelectedFile(null);
-  };
-
   const handleSendFile = () => {
     if (!selectedFile || !selectedPeerId) {
-      showToast('Please select a file and a destination device');
+      showToast('Select a file and a target device first');
       return;
     }
 
@@ -622,20 +603,18 @@ export default function App() {
       status: 'uploading',
       role: 'sender',
       peerName: targetPeer.name,
-      eta: 'Waiting for recipient...'
+      eta: 'Connecting...'
     };
 
     setTransfers(prev => [newTransfer, ...prev]);
     setSelectedFile(null);
 
-    // If local server is connected and peer is on local-ws, use local HTTP streaming
     if (wsConnected && targetPeer.transport === 'local-ws') {
       const xhr = new XMLHttpRequest();
       activeXhrs.current.set(fileId, xhr);
 
       const formData = new FormData();
       formData.append('file', file);
-
       const startTime = Date.now();
 
       xhr.upload.onprogress = (event) => {
@@ -648,8 +627,8 @@ export default function App() {
           const remainingBytes = event.total - loaded;
           const remainingSeconds = speedBps > 0 ? remainingBytes / speedBps : 0;
           const etaText = remainingSeconds < 60
-            ? `${Math.ceil(remainingSeconds)}s remaining`
-            : `${Math.floor(remainingSeconds / 60)}m ${Math.ceil(remainingSeconds % 60)}s remaining`;
+            ? `${Math.ceil(remainingSeconds)}s left`
+            : `${Math.floor(remainingSeconds / 60)}m left`;
 
           updateTransferStatus(fileId, 'uploading', {
             progress,
@@ -665,7 +644,7 @@ export default function App() {
           updateTransferStatus(fileId, 'waiting', {
             progress: 100,
             speed: 'Done',
-            eta: 'Waiting for recipient'
+            eta: 'Awaiting acceptance'
           });
 
           if (ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -679,27 +658,25 @@ export default function App() {
             }));
           }
         } else {
-          updateTransferStatus(fileId, 'failed', { speed: '0.00', eta: 'Upload error' });
-          showToast('File upload failed!');
+          updateTransferStatus(fileId, 'failed', { speed: '0.00', eta: 'Failed' });
+          showToast('Upload failed');
         }
         activeXhrs.current.delete(fileId);
       };
 
       xhr.onerror = () => {
         updateTransferStatus(fileId, 'failed', { speed: '0.00', eta: 'Network error' });
-        showToast('Network error during file upload.');
         activeXhrs.current.delete(fileId);
       };
 
       xhr.open('POST', `${serverUrl}/api/upload`);
       xhr.send(formData);
     } else {
-      // Direct P2P Transfer Mode (works on Vercel & across any network)
       pendingFiles.current.set(fileId, file);
       updateTransferStatus(fileId, 'waiting', {
         progress: 0,
         speed: 'P2P',
-        eta: 'Waiting for recipient to accept'
+        eta: 'Awaiting acceptance'
       });
       sendP2PSignal(selectedPeerId, {
         type: 'p2p-transfer-offer',
@@ -708,7 +685,7 @@ export default function App() {
         fileSize: file.size,
         fileType: file.type || 'application/octet-stream'
       });
-      showToast(`Transfer offer sent to ${targetPeer.name}`);
+      showToast(`Sent request to ${targetPeer.name}`);
     }
   };
 
@@ -751,10 +728,10 @@ export default function App() {
       setTimeout(() => {
         updateTransferStatus(transfer.fileId, 'completed', {
           progress: 100,
-          speed: 'Success',
-          eta: 'Completed'
+          speed: 'Done',
+          eta: 'Saved'
         });
-      }, 2500);
+      }, 2000);
     } else {
       sendP2PSignal(transfer.senderId, {
         type: 'p2p-transfer-accept',
@@ -782,7 +759,6 @@ export default function App() {
     }
 
     setIncomingTransfer(null);
-    showToast('Transfer declined.');
   };
 
   const cancelTransfer = (transfer: Transfer) => {
@@ -795,404 +771,443 @@ export default function App() {
     updateTransferStatus(transfer.id, 'failed', { speed: '0.00', eta: 'Cancelled' });
   };
 
-  const formatBytes = (bytes: number, decimals = 2) => {
-    if (bytes === 0) return '0 Bytes';
+  const formatBytes = (bytes: number, decimals = 1) => {
+    if (bytes === 0) return '0 B';
     const k = 1024;
     const dm = decimals < 0 ? 0 : decimals;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
   };
 
-  const getAvatarEmoji = (num: number) => {
-    const avatars = ['🦁', '🦊', '🐻', '🐼', '🐨', '🐯', '🐰', '🦅'];
-    return avatars[(num - 1) % avatars.length] || '🐱';
+  const getFileExtension = (name: string) => {
+    const parts = name.split('.');
+    if (parts.length > 1) {
+      return parts[parts.length - 1].substring(0, 4).toUpperCase();
+    }
+    return 'FILE';
+  };
+
+  const renderDeviceIcon = (deviceType?: string, size = 18) => {
+    if (deviceType && /mobile|phone|android|iphone/i.test(deviceType)) {
+      return <Smartphone size={size} />;
+    }
+    return <Laptop size={size} />;
   };
 
   const isSystemOnline = wsConnected || p2pConnected;
+  const activeTargetPeer = peers.find(p => p.id === selectedPeerId);
 
   return (
-    <div className="app-container">
-      {toast && <div className="toast-msg">{toast}</div>}
+    <div className="shell">
+      {toast && <div className="toast">{toast}</div>}
 
-      <header className="app-header">
-        <h1 className="brand-title">
-          ⚡ Kawerify <span>Transfer</span>
-        </h1>
-        <p className="brand-subtitle">
-          Superfast offline & P2P file transfers by{' '}
-          <a href="https://kawerifytech.com" target="_blank" rel="noopener noreferrer">
-            Kawerify Tech
+      {/* Top Navigation */}
+      <header className="topbar">
+        <div className="topbar-inner">
+          <a href="/" className="brand">
+            <div className="brand-mark">K</div>
+            <div className="brand-text">
+              <span className="brand-name">Kawerify Transfer</span>
+              <span className="brand-byline">Direct Local & P2P File Sharing</span>
+            </div>
           </a>
-        </p>
 
-        <div style={{ display: 'flex', justifyContent: 'center', gap: '0.75rem', marginTop: '0.85rem', flexWrap: 'wrap' }}>
-          <span style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '0.4rem',
-            fontSize: '0.78rem',
-            fontWeight: 600,
-            padding: '0.3rem 0.75rem',
-            borderRadius: '999px',
-            backgroundColor: isSystemOnline ? 'rgba(20, 184, 166, 0.15)' : 'rgba(245, 158, 11, 0.15)',
-            color: isSystemOnline ? 'var(--accent-teal)' : 'var(--accent-orange)',
-            border: `1px solid ${isSystemOnline ? 'rgba(20, 184, 166, 0.35)' : 'rgba(245, 158, 11, 0.35)'}`
-          }}>
-            <Wifi size={13} />
-            {wsConnected
-              ? 'Offline LAN Server Active'
-              : p2pConnected
-                ? 'Direct P2P Discovery Active'
-                : 'Initializing Discovery Engine...'}
-          </span>
+          <div className="topbar-actions">
+            <div className="status-pill">
+              <span className={`status-dot ${isSystemOnline ? 'online' : ''}`} />
+              <span>
+                {wsConnected
+                  ? 'Local Network Ready'
+                  : p2pConnected
+                    ? 'Direct P2P Ready'
+                    : 'Connecting...'}
+              </span>
+            </div>
 
-          <span style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '0.4rem',
-            fontSize: '0.78rem',
-            fontWeight: 600,
-            padding: '0.3rem 0.75rem',
-            borderRadius: '999px',
-            backgroundColor: 'rgba(6, 182, 212, 0.12)',
-            color: 'var(--accent-cyan)',
-            border: '1px solid rgba(6, 182, 212, 0.3)'
-          }}>
-            <HardDrive size={13} />
-            Device Storage Access Ready
-          </span>
-
-          <span style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '0.4rem',
-            fontSize: '0.78rem',
-            fontWeight: 600,
-            padding: '0.3rem 0.75rem',
-            borderRadius: '999px',
-            backgroundColor: 'rgba(255, 255, 255, 0.05)',
-            color: 'var(--text-secondary)',
-            border: '1px solid var(--border-color)'
-          }}>
-            <ShieldCheck size={13} />
-            End-to-End Direct Stream
-          </span>
+            <button
+              className="icon-btn"
+              onClick={() => setTheme(prev => (prev === 'dark' ? 'light' : 'dark'))}
+              title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              aria-label="Toggle color theme"
+            >
+              {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+          </div>
         </div>
       </header>
 
-      <div className="app-grid">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          <div className="panel-card">
-            <h2 className="panel-title">
-              <User size={20} /> My Device Profile
-            </h2>
-            <div className="self-device">
-              <div className="self-info-left">
-                <div className="avatar-container">
-                  {getAvatarEmoji(me.avatar)}
-                </div>
-                <div>
-                  <input
-                    type="text"
-                    className="device-name-input"
-                    value={customName}
-                    onChange={(e) => setCustomName(e.target.value)}
-                    onBlur={handleRename}
-                    onKeyDown={(e) => e.key === 'Enter' && handleRename()}
-                    title="Click to change device name"
-                  />
-                  <div className="device-label">{me.deviceType || 'Active Peer'}</div>
-                </div>
+      {/* Main Content */}
+      <main className="workspace">
+        {/* Left Column: This Device & Nearby Peers */}
+        <div className="column">
+          <section className="card">
+            <div className="card-header">
+              <div className="card-title-group">
+                <span className="card-title">This Device</span>
               </div>
-              <button className="btn btn-secondary" style={{ padding: '0.4rem' }} onClick={handleRename} title="Save profile name">
-                <Check size={16} />
-              </button>
+              <span className="card-subtitle mono">{me.id}</span>
             </div>
 
-            <div className="ip-panel">
-              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
-                Instant Pairing Link:
-              </div>
-              <div className="ip-list">
-                {ips.length > 0 ? (
-                  ips.map(linkUrl => (
-                    <div key={linkUrl} className="ip-item">
-                      <span>Share URL:</span>
-                      <span className="ip-value" onClick={() => handleCopyLink(linkUrl)}>
-                        {linkUrl} <Copy size={12} style={{ marginLeft: '4px', verticalAlign: 'middle' }} />
-                      </span>
+            <div className="card-body">
+              <div className="identity-box">
+                <div className="identity-left">
+                  <div className="device-badge-icon">
+                    {renderDeviceIcon(me.deviceType, 20)}
+                  </div>
+                  <div className="identity-meta">
+                    <div className="identity-label">Visible Name</div>
+                    <div className="identity-input-row">
+                      <input
+                        type="text"
+                        className="identity-input"
+                        value={customName}
+                        onChange={(e) => setCustomName(e.target.value)}
+                        onBlur={handleRename}
+                        onKeyDown={(e) => e.key === 'Enter' && handleRename()}
+                        aria-label="Device name"
+                      />
                     </div>
-                  ))
-                ) : (
-                  <div className="ip-item" style={{ color: 'var(--text-muted)' }}>
-                    Generating pairing link...
+                  </div>
+                </div>
+                {customName.trim() !== me.name && (
+                  <button className="btn btn-secondary btn-sm" onClick={handleRename}>
+                    Save
+                  </button>
+                )}
+              </div>
+
+              <div className="pairing-section">
+                {ips.map((linkUrl) => (
+                  <div key={linkUrl} className="url-copy-box">
+                    <span className="url-text mono">{linkUrl}</span>
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => handleCopyLink(linkUrl)}
+                    >
+                      {copiedUrl === linkUrl ? (
+                        <>
+                          <Check size={13} /> Copied
+                        </>
+                      ) : (
+                        <>
+                          <Copy size={13} /> Copy
+                        </>
+                      )}
+                    </button>
+                  </div>
+                ))}
+
+                {qrCodeUrl && (
+                  <div className="qr-panel">
+                    <div className="qr-frame">
+                      <img src={qrCodeUrl} alt="Pair via QR code" />
+                    </div>
+                    <div className="qr-info">
+                      <h4>Pair another device</h4>
+                      <p>
+                        Scan this code with your phone camera or open the URL above on another computer to connect immediately.
+                      </p>
+                    </div>
                   </div>
                 )}
               </div>
             </div>
+          </section>
 
-            {qrCodeUrl && (
-              <div className="qr-section">
-                <div className="qr-canvas-wrapper">
-                  <img src={qrCodeUrl} alt="Share QR Code" style={{ width: '130px', height: '130px', display: 'block' }} />
-                </div>
-                <p className="qr-caption">
-                  Scan with your phone or open on another laptop to connect and share immediately
-                </p>
+          <section className="card">
+            <div className="card-header">
+              <div className="card-title-group">
+                <span className="card-title">Nearby Devices</span>
+                <span className="transport-tag mono">{peers.length}</span>
               </div>
-            )}
-          </div>
-
-          <div className="panel-card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.75rem', marginBottom: '0.25rem' }}>
-              <h2 className="panel-title" style={{ borderBottom: 'none', paddingBottom: 0, marginBottom: 0 }}>
-                <Users size={20} /> Devices Nearby ({peers.length})
-              </h2>
               <button
-                className="btn btn-secondary"
-                style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}
+                className="btn btn-secondary btn-sm"
                 onClick={() => {
                   sendP2PSignal('broadcast', { type: 'presence' });
                   sendP2PSignal('broadcast', { type: 'presence-request' });
-                  showToast('Scanning for nearby devices...');
+                  showToast('Refreshing nearby devices...');
                 }}
               >
-                <RefreshCw size={13} /> Scan
+                <RefreshCw size={13} /> Refresh
               </button>
             </div>
-            <div className="peer-list">
+
+            <div className="card-body">
               {peers.length > 0 ? (
-                peers.map(peer => (
-                  <div
-                    key={peer.id}
-                    className={`peer-item ${selectedPeerId === peer.id ? 'selected' : ''}`}
-                    onClick={() => setSelectedPeerId(peer.id)}
-                  >
-                    <div className="peer-info">
-                      <div className="peer-avatar">
-                        {getAvatarEmoji(peer.avatar)}
-                      </div>
-                      <div>
-                        <div className="peer-name">{peer.name}</div>
-                        <div className="peer-status">
-                          {peer.deviceType || 'Ready to receive'} • {peer.transport === 'local-ws' ? 'Offline LAN' : 'Direct P2P'}
+                <div className="peers-grid">
+                  {peers.map((peer) => {
+                    const isSelected = selectedPeerId === peer.id;
+                    return (
+                      <div
+                        key={peer.id}
+                        className={`peer-card ${isSelected ? 'selected' : ''}`}
+                        onClick={() => setSelectedPeerId(peer.id)}
+                      >
+                        <div className="peer-card-left">
+                          <div className="peer-icon-box">
+                            {renderDeviceIcon(peer.deviceType, 18)}
+                          </div>
+                          <div style={{ minWidth: 0 }}>
+                            <div className="peer-card-name">{peer.name}</div>
+                            <div className="peer-card-meta">
+                              <span>{peer.deviceType || 'Computer'}</span>
+                              <span>•</span>
+                              <span>{peer.transport === 'local-ws' ? 'LAN' : 'Direct P2P'}</span>
+                            </div>
+                          </div>
                         </div>
+                        <span className="transport-tag">
+                          {isSelected ? 'Target' : 'Select'}
+                        </span>
                       </div>
-                    </div>
-                    {selectedPeerId === peer.id && (
-                      <span style={{ color: 'var(--accent-cyan)', fontSize: '0.8rem', fontWeight: 700 }}>
-                        SELECTED
-                      </span>
-                    )}
-                  </div>
-                ))
+                    );
+                  })}
+                </div>
               ) : (
-                <div className="no-peers-placeholder">
-                  <div className="no-peers-pulse"></div>
-                  <p>Searching for nearby devices...</p>
-                  <p style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>
-                    Open this link or scan the QR code on your phone or another laptop
+                <div className="empty-radar">
+                  <div className="radar-circles">
+                    <Radio size={20} />
+                  </div>
+                  <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                    Waiting for other devices
+                  </div>
+                  <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', maxWidth: '250px' }}>
+                    Open this page on your phone or another laptop to appear here automatically.
                   </p>
                 </div>
               )}
             </div>
-          </div>
+          </section>
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          <div className="panel-card">
-            <h2 className="panel-title">
-              <Share2 size={20} /> Send Files from Storage
-            </h2>
-
-            {!selectedFile ? (
-              <div
-                className={`drag-drop-area ${isDragActive ? 'active' : ''}`}
-                onDragEnter={handleDrag}
-                onDragOver={handleDrag}
-                onDragLeave={handleDrag}
-                onDrop={handleDrop}
-                onClick={triggerFileInput}
-              >
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  className="file-input"
-                  onChange={handleFileChange}
-                />
-                <div className="drag-drop-icon">
-                  <FolderOpen size={28} />
-                </div>
-                <div className="drag-drop-title">Drag & Drop any file here</div>
-                <div className="drag-drop-desc">or click to browse device storage (Photos, Videos, Documents, Archives)</div>
+        {/* Right Column: File Selection & Transfers */}
+        <div className="column">
+          <section className="card">
+            <div className="card-header">
+              <div className="card-title-group">
+                <span className="card-title">Send File</span>
               </div>
-            ) : (
-              <div className="file-preview-box">
-                <div className="file-preview-info">
-                  <div className="file-icon-wrapper">
-                    <FileText size={20} />
-                  </div>
-                  <div className="file-meta">
-                    <div className="file-name" title={selectedFile.name}>{selectedFile.name}</div>
-                    <div className="file-size">{formatBytes(selectedFile.size)}</div>
-                  </div>
-                </div>
-                <button className="btn-remove-file" onClick={clearSelectedFile} title="Remove file">
-                  <X size={18} />
-                </button>
-              </div>
-            )}
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                Target Destination Device:
-              </label>
-              <select
-                style={{
-                  width: '100%',
-                  background: 'var(--bg-secondary)',
-                  border: '1px solid var(--border-color)',
-                  color: '#ffffff',
-                  padding: '0.65rem',
-                  borderRadius: 'var(--border-radius-sm)',
-                  fontSize: '0.9rem',
-                  outline: 'none'
-                }}
-                value={selectedPeerId}
-                onChange={(e) => setSelectedPeerId(e.target.value)}
-              >
-                <option value="">-- Choose target device --</option>
-                {peers.map(p => (
-                  <option key={p.id} value={p.id}>{p.name} ({p.deviceType || 'Peer'})</option>
-                ))}
-              </select>
+              <span className="card-subtitle">No file size limits</span>
             </div>
 
-            <div className="action-footer">
-              {selectedFile && (
-                <button className="btn btn-secondary" onClick={clearSelectedFile}>
-                  Cancel
-                </button>
-              )}
-              <button
-                className="btn btn-primary"
-                onClick={handleSendFile}
-                disabled={!selectedFile || !selectedPeerId}
-              >
-                <Send size={16} /> Share Now
-              </button>
-            </div>
-          </div>
+            <div className="card-body">
+              <input
+                type="file"
+                ref={fileInputRef}
+                style={{ display: 'none' }}
+                onChange={handleFileChange}
+              />
 
-          <div className="panel-card" style={{ flexGrow: 1 }}>
-            <h2 className="panel-title">
-              <RefreshCw size={20} /> Active & Recent Transfers
-            </h2>
-            <div className="transfers-container">
-              {transfers.length > 0 ? (
-                transfers.map(transfer => (
-                  <div
-                    key={transfer.id}
-                    className={`transfer-item ${
-                      transfer.status === 'completed' ? 'completed' :
-                      transfer.status === 'failed' ? 'failed' : ''
-                    }`}
-                  >
-                    <div className="transfer-header">
-                      <div className="transfer-details">
-                        <span className={`transfer-badge ${transfer.role === 'sender' ? 'send' : 'receive'}`}>
-                          {transfer.role}
-                        </span>
-                        <span className="file-name" style={{ maxWidth: '220px' }} title={transfer.name}>
-                          {transfer.name}
-                        </span>
-                      </div>
-
-                      {['uploading', 'downloading', 'waiting'].includes(transfer.status) && (
-                        <button
-                          className="btn-remove-file"
-                          onClick={() => cancelTransfer(transfer)}
-                          title="Cancel transfer"
-                        >
-                          <X size={16} />
-                        </button>
-                      )}
-                      {transfer.status === 'completed' && (
-                        <span style={{ color: 'var(--accent-teal)', fontSize: '0.8rem', fontWeight: 700 }}>
-                          DONE
-                        </span>
-                      )}
-                      {transfer.status === 'failed' && (
-                        <span style={{ color: 'var(--accent-red)', fontSize: '0.8rem', fontWeight: 700 }}>
-                          FAILED
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="transfer-progress-block">
-                      <div className="transfer-progress-bar-bg">
-                        <div
-                          className="transfer-progress-bar-fg"
-                          style={{ width: `${transfer.progress}%` }}
-                        ></div>
-                      </div>
-                    </div>
-
-                    <div className="transfer-stats">
-                      <span>Size: {formatBytes(transfer.size)} • Peer: {transfer.peerName}</span>
-                      <div className="transfer-stats-right">
-                        <span>Speed: {transfer.speed} {transfer.speed !== 'Done' && transfer.speed !== 'Success' && transfer.speed !== '--' && transfer.speed !== 'P2P' ? 'MB/s' : ''}</span>
-                        <span style={{ color: 'var(--text-muted)' }}>|</span>
-                        <span>{transfer.eta}</span>
-                      </div>
-                    </div>
+              {!selectedFile ? (
+                <div
+                  className={`dropzone ${isDragActive ? 'active' : ''}`}
+                  onDragEnter={handleDrag}
+                  onDragOver={handleDrag}
+                  onDragLeave={handleDrag}
+                  onDrop={handleDrop}
+                  onClick={triggerFileInput}
+                >
+                  <div className="dropzone-icon">
+                    <FolderOpen size={20} />
                   </div>
-                ))
+                  <div className="dropzone-title">Choose a file or drag it here</div>
+                  <div className="dropzone-hint">
+                    Supports photos, videos, archives, and documents directly from device storage
+                  </div>
+                </div>
               ) : (
-                <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-                  No transfers yet. Drop a file and choose a nearby device to start sharing.
+                <div className="selected-file-card">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0 }}>
+                    <div className="file-ext-badge mono">
+                      {getFileExtension(selectedFile.name)}
+                    </div>
+                    <div style={{ minWidth: 0 }}>
+                      <div className="transfer-filename" title={selectedFile.name}>
+                        {selectedFile.name}
+                      </div>
+                      <div className="card-subtitle mono" style={{ marginTop: '0.1rem' }}>
+                        {formatBytes(selectedFile.size)}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    className="icon-btn"
+                    onClick={() => setSelectedFile(null)}
+                    title="Remove file"
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+              )}
+
+              <div className="send-bar">
+                <div className="target-indicator">
+                  {activeTargetPeer ? (
+                    <>
+                      Sending to <strong>{activeTargetPeer.name}</strong>
+                    </>
+                  ) : (
+                    <span>Select a recipient under Nearby Devices</span>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  {selectedFile && (
+                    <button className="btn btn-secondary" onClick={triggerFileInput}>
+                      Change File
+                    </button>
+                  )}
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleSendFile}
+                    disabled={!selectedFile || !selectedPeerId}
+                  >
+                    <Send size={15} /> Send File
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="card">
+            <div className="card-header">
+              <div className="card-title-group">
+                <span className="card-title">Transfers</span>
+                {transfers.length > 0 && (
+                  <span className="transport-tag mono">{transfers.length}</span>
+                )}
+              </div>
+              {transfers.some(t => t.status === 'completed' || t.status === 'failed') && (
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setTransfers(prev => prev.filter(t => t.status !== 'completed' && t.status !== 'failed'))}
+                >
+                  Clear finished
+                </button>
+              )}
+            </div>
+
+            <div className="card-body">
+              {transfers.length > 0 ? (
+                <div className="transfer-list">
+                  {transfers.map((transfer) => (
+                    <div
+                      key={transfer.id}
+                      className={`transfer-row ${
+                        transfer.status === 'completed' ? 'completed' :
+                        transfer.status === 'failed' ? 'failed' : ''
+                      }`}
+                    >
+                      <div className="transfer-row-top">
+                        <div className="transfer-title-wrap">
+                          <span className={`role-pill ${transfer.role}`}>
+                            {transfer.role === 'sender' ? 'Out' : 'In'}
+                          </span>
+                          <span className="transfer-filename" title={transfer.name}>
+                            {transfer.name}
+                          </span>
+                        </div>
+
+                        {['uploading', 'downloading', 'waiting'].includes(transfer.status) ? (
+                          <button
+                            className="icon-btn"
+                            style={{ width: 26, height: 26 }}
+                            onClick={() => cancelTransfer(transfer)}
+                            title="Cancel transfer"
+                          >
+                            <X size={14} />
+                          </button>
+                        ) : (
+                          <span className="mono" style={{
+                            fontSize: '0.73rem',
+                            fontWeight: 600,
+                            color: transfer.status === 'completed' ? 'var(--status-online)' : 'var(--status-danger)'
+                          }}>
+                            {transfer.status === 'completed' ? 'Completed' : 'Canceled'}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="progress-track">
+                        <div
+                          className="progress-fill"
+                          style={{ width: `${transfer.progress}%` }}
+                        />
+                      </div>
+
+                      <div className="transfer-meta-row mono">
+                        <span>{formatBytes(transfer.size)} • {transfer.peerName}</span>
+                        <span>
+                          {transfer.speed !== 'Done' && transfer.speed !== '--' && transfer.speed !== 'P2P'
+                            ? `${transfer.speed} MB/s • `
+                            : ''}
+                          {transfer.eta}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '0.84rem' }}>
+                  Active and completed file transfers will appear here.
                 </div>
               )}
             </div>
-          </div>
+          </section>
         </div>
-      </div>
+      </main>
 
+      {/* Incoming Transfer Modal */}
       {incomingTransfer && (
-        <div className="dialog-overlay">
-          <div className="dialog-content">
-            <div className="dialog-header">
-              <Download size={22} style={{ color: 'var(--accent-cyan)' }} />
-              Incoming File Transfer
+        <div className="modal-backdrop">
+          <div className="modal-card">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+              <div className="device-badge-icon" style={{ width: 34, height: 34 }}>
+                <Download size={18} />
+              </div>
+              <div>
+                <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>Incoming File</div>
+                <div className="card-subtitle">From {incomingTransfer.senderName}</div>
+              </div>
             </div>
-            <div className="dialog-body">
-              <p>
-                <strong>{incomingTransfer.senderName}</strong> wants to send you a file:
-              </p>
-              <div className="dialog-file-info">
-                <FileText size={28} style={{ color: 'var(--accent-cyan)' }} />
-                <div style={{ overflow: 'hidden' }}>
-                  <div className="file-name" style={{ fontSize: '0.95rem' }} title={incomingTransfer.fileName}>
+
+            <div className="selected-file-card">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0 }}>
+                <div className="file-ext-badge mono">
+                  <FileText size={16} />
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div className="transfer-filename" title={incomingTransfer.fileName}>
                     {incomingTransfer.fileName}
                   </div>
-                  <div className="file-size" style={{ fontSize: '0.8rem' }}>
+                  <div className="card-subtitle mono">
                     {formatBytes(incomingTransfer.fileSize)}
                   </div>
                 </div>
               </div>
             </div>
-            <div className="action-footer" style={{ marginTop: '0.5rem' }}>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
               <button className="btn btn-secondary" onClick={handleRejectTransfer}>
                 Decline
               </button>
               <button className="btn btn-primary" onClick={handleAcceptTransfer}>
-                Accept & Save to Device
+                Accept & Save
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* Footer */}
+      <footer className="footer">
+        Built by{' '}
+        <a href="https://kawerifytech.com" target="_blank" rel="noopener noreferrer">
+          Kawerify Tech <ArrowUpRight size={12} style={{ verticalAlign: 'text-top' }} />
+        </a>{' '}
+        • Free & Open Source under 8 Licenses
+      </footer>
     </div>
   );
 }
