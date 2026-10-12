@@ -15,42 +15,43 @@ const PORT = process.env.PORT || 5000;
 const app = express();
 const server = createServer(app);
 
-// Enable CORS for frontend development
-app.use(cors());
-app.use(express.json());
+// Disable server timeouts so multi-terabyte (1TB+) streams never time out
+server.timeout = 0;
+server.keepAliveTimeout = 0;
+server.requestTimeout = 0;
 
-// Ensure uploads directory exists
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
-// Config Multer for local disk storage
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
+  destination: (_req, _file, cb) => {
     cb(null, UPLOADS_DIR);
   },
-  filename: (req, file, cb) => {
-    // Save file with a safe timestamp prefix + original name to avoid collision
+  filename: (_req, file, cb) => {
     const fileId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     cb(null, `${fileId}-${file.originalname}`);
   }
 });
 
+// Unlimited file size (supports 1TB+ files streamed directly to disk)
 const upload = multer({
   storage,
-  limits: { fileSize: 100 * 1024 * 1024 * 1024 } // 100 GB limit
+  limits: { fileSize: Infinity }
 });
 
-// Map to track active file metadata: fileId -> { name, size, type, path }
+// Map: fileId -> { id, name, size, type, path, remainingDownloads, createdAt }
 const activeTransfers = new Map();
 
-// Helper to get local IPv4 addresses
 function getLocalIPs() {
   const nets = networkInterfaces();
   const addresses = [];
   for (const name of Object.keys(nets)) {
-    for (const net of nets[name]) {
+    for (const net of nets[name] || []) {
       if (net.family === 'IPv4' && !net.internal) {
         addresses.push(net.address);
       }
@@ -59,27 +60,27 @@ function getLocalIPs() {
   return addresses;
 }
 
-// Endpoint to list local IPs
-app.get('/api/ips', (req, res) => {
+app.get('/api/ips', (_req, res) => {
   res.json({ ips: getLocalIPs(), port: PORT });
 });
 
-// File upload endpoint
 app.post('/api/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
 
-  // extract actual fileId from saved filename
   const filename = req.file.filename;
   const fileId = filename.substring(0, filename.indexOf('-', filename.indexOf('-') + 1));
+  const targetCount = Math.max(1, parseInt(req.query.targets || '1', 10));
 
   const fileData = {
     id: fileId,
     name: req.file.originalname,
     size: req.file.size,
     type: req.file.mimetype || 'application/octet-stream',
-    path: req.file.path
+    path: req.file.path,
+    remainingDownloads: targetCount,
+    createdAt: Date.now()
   };
 
   activeTransfers.set(fileId, fileData);
@@ -93,52 +94,43 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
   });
 });
 
-// File download endpoint with auto-cleanup after transfer
 app.get('/api/download/:fileId', (req, res) => {
   const { fileId } = req.params;
   const fileData = activeTransfers.get(fileId);
 
-  if (!fileData) {
-    return res.status(404).send('File not found or transfer expired');
-  }
-
-  if (!fs.existsSync(fileData.path)) {
+  if (!fileData || !fs.existsSync(fileData.path)) {
     activeTransfers.delete(fileId);
-    return res.status(404).send('File does not exist on disk');
+    return res.status(404).send('File not found or transfer expired');
   }
 
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileData.name)}"`);
   res.setHeader('Content-Type', fileData.type);
   res.setHeader('Content-Length', fileData.size);
 
-  const fileStream = fs.createReadStream(fileData.path);
+  // Use 1MB highWaterMark chunks for maximum LAN throughput on multi-gigabyte / 1TB files
+  const fileStream = fs.createReadStream(fileData.path, { highWaterMark: 1024 * 1024 });
   fileStream.pipe(res);
 
-  // Clean up disk and map once transfer is complete or interrupted
   res.on('finish', () => {
-    setTimeout(() => {
-      try {
-        if (fs.existsSync(fileData.path)) {
-          fs.unlinkSync(fileData.path);
+    fileData.remainingDownloads -= 1;
+    if (fileData.remainingDownloads <= 0) {
+      setTimeout(() => {
+        try {
+          if (fs.existsSync(fileData.path)) {
+            fs.unlinkSync(fileData.path);
+          }
+        } catch (err) {
+          console.error(`Error deleting file ${fileData.name}:`, err);
         }
-      } catch (err) {
-        console.error(`Error deleting file ${fileData.name}:`, err);
-      }
-      activeTransfers.delete(fileId);
-    }, 5000); // 5 second buffer to make sure client received bytes
-  });
-
-  res.on('close', () => {
-    // If connection was closed early, don't delete yet unless fully finished
-    // Res will finish if complete. If connection interrupted, we keep it temporarily
+        activeTransfers.delete(fileId);
+      }, 10000);
+    }
   });
 });
 
-// Serve frontend build output
 app.use(express.static(path.join(__dirname, 'client', 'dist')));
 
-// SPA route fallback
-app.get('*', (req, res, next) => {
+app.get('*', (_req, res) => {
   const indexHtmlPath = path.join(__dirname, 'client', 'dist', 'index.html');
   if (fs.existsSync(indexHtmlPath)) {
     res.sendFile(indexHtmlPath);
@@ -147,44 +139,38 @@ app.get('*', (req, res, next) => {
   }
 });
 
-// Setup WebSocket server
 const wss = new WebSocketServer({ server });
-
-// Map of peer ID -> client state
 const peers = new Map();
 
-// Random Name Generator
-const ADJECTIVES = ['Swift', 'Silent', 'Hyper', 'Turbo', 'Ninja', 'Cosmic', 'Solar', 'Quantum', 'Nebula', 'Echo', 'Frost', 'Wild'];
-const ANIMALS = ['Cheetah', 'Falcon', 'Panther', 'Shark', 'Eagle', 'Wolf', 'Leopard', 'Hawk', 'Badger', 'Tiger', 'Viper', 'Lynx'];
+const ADJECTIVES = ['North', 'Cobalt', 'Amber', 'Cedar', 'Lunar', 'Sol', 'Vertex', 'Quartz', 'Metro', 'Atlas', 'Prime'];
+const NOUNS = ['Laptop', 'Workstation', 'Studio', 'Node', 'Terminal', 'Device'];
 
 function generateRandomName() {
   const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-  const animal = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
-  const num = Math.floor(Math.random() * 900) + 100;
-  return `${adj} ${animal} ${num}`;
+  const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+  const num = Math.floor(Math.random() * 90) + 10;
+  return `${adj} ${noun}-${num}`;
 }
 
 wss.on('connection', (ws) => {
   const peerId = `peer-${Math.random().toString(36).substring(2, 9)}`;
   const peerName = generateRandomName();
-  const avatarSeed = Math.floor(Math.random() * 8) + 1; // 8 avatar variations
 
   const peerState = {
     id: peerId,
     name: peerName,
-    avatar: avatarSeed,
+    avatar: 1,
+    deviceType: 'Laptop / Desktop',
     joinedAt: Date.now()
   };
 
   peers.set(peerId, { ws, state: peerState });
 
-  // Welcome message with local peer details
   ws.send(JSON.stringify({
     type: 'welcome',
     peer: peerState
   }));
 
-  // Broadcast peer updates to everyone
   broadcastPeers();
 
   ws.on('message', (message) => {
@@ -196,48 +182,68 @@ wss.on('connection', (ws) => {
           if (data.name && data.name.trim().length > 0) {
             const current = peers.get(peerId);
             if (current) {
-              current.state.name = data.name.trim().substring(0, 20);
+              current.state.name = data.name.trim().substring(0, 24);
+              if (data.deviceType) current.state.deviceType = data.deviceType;
               broadcastPeers();
             }
           }
           break;
 
-        case 'transfer-init':
-          // Forward file transfer offer to target peer
-          if (data.targetId && peers.has(data.targetId)) {
-            const target = peers.get(data.targetId);
-            target.ws.send(JSON.stringify({
-              type: 'transfer-offer',
-              senderId: peerId,
-              senderName: peerState.name,
-              fileId: data.fileId,
-              fileName: data.fileName,
-              fileSize: data.fileSize,
-              fileType: data.fileType
-            }));
+        case 'transfer-init': {
+          // Support single targetId OR array of targetIds (for sharing to 5+ devices at once)
+          const targets = Array.isArray(data.targetIds)
+            ? data.targetIds
+            : data.targetId
+              ? [data.targetId]
+              : [];
+
+          for (const tid of targets) {
+            if (peers.has(tid)) {
+              const target = peers.get(tid);
+              target.ws.send(JSON.stringify({
+                type: 'transfer-offer',
+                senderId: peerId,
+                senderName: peerState.name,
+                fileId: data.fileId,
+                fileName: data.fileName,
+                fileSize: data.fileSize,
+                fileType: data.fileType
+              }));
+            }
           }
           break;
+        }
 
         case 'transfer-accept':
-          // Forward accept to sender
           if (data.senderId && peers.has(data.senderId)) {
             const sender = peers.get(data.senderId);
             sender.ws.send(JSON.stringify({
               type: 'transfer-accepted',
               receiverId: peerId,
+              receiverName: peerState.name,
               fileId: data.fileId
             }));
           }
           break;
 
         case 'transfer-cancel':
-          // Forward cancel to peer
           if (data.targetId && peers.has(data.targetId)) {
             const target = peers.get(data.targetId);
             target.ws.send(JSON.stringify({
               type: 'transfer-canceled',
               peerId: peerId,
               fileId: data.fileId
+            }));
+          }
+          break;
+
+        case 'webrtc-signal':
+          if (data.targetId && peers.has(data.targetId)) {
+            const target = peers.get(data.targetId);
+            target.ws.send(JSON.stringify({
+              ...data,
+              senderId: peerId,
+              senderName: peerState.name
             }));
           }
           break;
@@ -270,7 +276,6 @@ function broadcastPeers() {
   }
 }
 
-// Start Server
 server.listen(PORT, '0.0.0.0', () => {
   const ips = getLocalIPs();
   console.log('==================================================');
@@ -284,4 +289,3 @@ server.listen(PORT, '0.0.0.0', () => {
 });
 
 // Build version: 127
-
