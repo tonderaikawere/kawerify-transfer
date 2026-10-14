@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 5000;
 const app = express();
 const server = createServer(app);
 
-// Disable all timeouts and enable TCP NoDelay for maximum throughput on 1TB+ and 100+ file streams
+// Disable timeouts and enable TCP NoDelay for high-speed streaming
 server.timeout = 0;
 server.keepAliveTimeout = 0;
 server.requestTimeout = 0;
@@ -41,7 +41,6 @@ const storage = multer.diskStorage({
   }
 });
 
-// Unlimited file size (1TB+) and unlimited file count (100, 1000+ files at once)
 const upload = multer({
   storage,
   limits: {
@@ -51,7 +50,6 @@ const upload = multer({
   }
 });
 
-// Map: fileId -> { id, name, size, type, path, remainingDownloads, createdAt }
 const activeTransfers = new Map();
 
 function getLocalIPs() {
@@ -71,7 +69,6 @@ app.get('/api/ips', (_req, res) => {
   res.json({ ips: getLocalIPs(), port: PORT });
 });
 
-// Single or Multi-file high-speed streaming upload
 app.post('/api/upload', upload.any(), (req, res) => {
   const uploadedFiles = req.files || (req.file ? [req.file] : []);
   if (!uploadedFiles || uploadedFiles.length === 0) {
@@ -124,12 +121,18 @@ app.get('/api/download/:fileId', (req, res) => {
     return res.status(404).send('File not found or transfer expired');
   }
 
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileData.name)}"`);
-  res.setHeader('Content-Type', fileData.type);
+  // Prevent browser compression or transcoding that corrupts binary files
+  res.setHeader('Content-Encoding', 'identity');
+  res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Length', fileData.size);
 
-  // 4MB highWaterMark buffer for maximum sequential disk-to-socket throughput
-  const fileStream = fs.createReadStream(fileData.path, { highWaterMark: 4 * 1024 * 1024 });
+  const safeAsciiName = fileData.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="${safeAsciiName}"; filename*=UTF-8''${encodeURIComponent(fileData.name)}`
+  );
+
+  const fileStream = fs.createReadStream(fileData.path, { highWaterMark: 1024 * 1024 });
   fileStream.pipe(res);
 
   res.on('finish', () => {
