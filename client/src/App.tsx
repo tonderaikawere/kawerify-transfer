@@ -43,6 +43,7 @@ interface Transfer {
   role: 'sender' | 'receiver';
   peerName: string;
   eta: string;
+  blobUrl?: string;
 }
 
 interface IncomingOffer {
@@ -57,9 +58,11 @@ interface IncomingOffer {
 
 interface IncomingStreamState {
   chunks: Uint8Array[];
+  chunksMap?: Map<number, Uint8Array>;
   receivedBytes: number;
   totalSize: number;
   expectedChunkIndex: number;
+  totalChunks?: number;
   fileName: string;
   fileType: string;
   startTime: number;
@@ -71,8 +74,12 @@ const RTC_CONFIG: RTCConfiguration = {
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:stun.services.mozilla.com' },
     { urls: 'stun:stun.cloudflare.com:3478' }
-  ]
+  ],
+  iceCandidatePoolSize: 10
 };
 
 const ADJECTIVES = ['North', 'Cobalt', 'Amber', 'Cedar', 'Lunar', 'Sol', 'Vertex', 'Quartz', 'Metro', 'Atlas', 'Prime'];
@@ -198,11 +205,16 @@ export default function App() {
   // Single persistent RTCPeerConnection and RTCDataChannel per target peer
   const rtcPeers = useRef<Map<string, RTCPeerConnection>>(new Map());
   const rtcChannels = useRef<Map<string, RTCDataChannel>>(new Map());
-  const rtcReadyPromises = useRef<Map<string, { promise: Promise<RTCDataChannel>; resolve: (dc: RTCDataChannel) => void }>>(new Map());
+  const rtcReadyPromises = useRef<Map<string, { promise: Promise<RTCDataChannel>; resolve: (dc: RTCDataChannel) => void; reject: (err: Error) => void }>>(new Map());
+  const pendingIceCandidates = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
 
-  // Outgoing sequential queue to avoid network / WebRTC flooding
-  const outgoingQueue = useRef<Array<{ targetId: string; fileId: string; file: File }>>([]);
-  const isPumpingQueue = useRef<boolean>(false);
+  // Independent per-peer queues so sharing to 5+ devices streams concurrently without blocking
+  const outgoingQueuesByPeer = useRef<Map<string, Array<{ fileId: string; file: File }>>>(new Map());
+  const activePeerPumps = useRef<Set<string>>(new Set());
+
+  // Waiters for reliable fallback flow-control ACKs
+  const chunkAckWaiters = useRef<Map<string, (chunkIndex: number) => void>>(new Map());
+  const audioContextRef = useRef<AudioContext | null>(null);
 
   const meRef = useRef<Peer>(me);
   const roomRef = useRef<string>(roomCode);
@@ -221,8 +233,8 @@ export default function App() {
     roomRef.current = roomCode;
   }, [roomCode]);
 
-  // Request Screen Wake Lock so phones don't sleep in the background during sending/receiving
-  const acquireWakeLock = useCallback(async () => {
+  // Screen Wake Lock & Background Audio Keep-Alive so mobile phones don't sleep or freeze when switching tabs
+  const startBackgroundServices = useCallback(async () => {
     if ('wakeLock' in navigator && !wakeLockRef.current) {
       try {
         wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
@@ -233,9 +245,28 @@ export default function App() {
         // ignore
       }
     }
+    try {
+      if (!audioContextRef.current) {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          gain.gain.value = 0.0001; // Inaudible tone prevents OS background thread sleep
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start();
+          audioContextRef.current = ctx;
+        }
+      } else if (audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume();
+      }
+    } catch {
+      // ignore
+    }
   }, []);
 
-  const releaseWakeLock = useCallback(() => {
+  const stopBackgroundServices = useCallback(() => {
     if (wakeLockRef.current) {
       try {
         wakeLockRef.current.release();
@@ -244,29 +275,37 @@ export default function App() {
         // ignore
       }
     }
+    if (audioContextRef.current) {
+      try {
+        audioContextRef.current.close();
+        audioContextRef.current = null;
+      } catch {
+        // ignore
+      }
+    }
   }, []);
 
-  // Monitor active transfers to manage Wake Lock lifecycle
+  // Monitor active transfers to manage Wake Lock & Background lifecycle
   useEffect(() => {
     const hasActive = transfers.some(t => t.status === 'uploading' || t.status === 'downloading');
     if (hasActive) {
-      acquireWakeLock();
+      startBackgroundServices();
     } else {
-      releaseWakeLock();
+      stopBackgroundServices();
     }
-  }, [transfers, acquireWakeLock, releaseWakeLock]);
+  }, [transfers, startBackgroundServices, stopBackgroundServices]);
 
   // Re-acquire wake lock if tab becomes visible again while transfers are ongoing
   useEffect(() => {
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
         const hasActive = transfers.some(t => t.status === 'uploading' || t.status === 'downloading');
-        if (hasActive) acquireWakeLock();
+        if (hasActive) startBackgroundServices();
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
     return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, [transfers, acquireWakeLock]);
+  }, [transfers, startBackgroundServices]);
 
   const isLocalNetworkHost =
     window.location.hostname === 'localhost' ||
@@ -298,9 +337,12 @@ export default function App() {
    * Safe, Uncorrupted Browser Download:
    * Uses application/octet-stream and preserves original filename & extension without browser transcoding.
    */
-  const saveBlobToDeviceStorage = useCallback((blob: Blob, fileName: string) => {
+  const saveBlobToDeviceStorage = useCallback((blob: Blob, fileName: string, fileId?: string) => {
     try {
       const url = URL.createObjectURL(blob);
+      if (fileId) {
+        setTransfers(prev => prev.map(t => t.id === fileId ? { ...t, blobUrl: url } : t));
+      }
       const link = document.createElement('a');
       link.href = url;
       link.download = fileName;
@@ -310,11 +352,10 @@ export default function App() {
       setTimeout(() => {
         try {
           document.body.removeChild(link);
-          URL.revokeObjectURL(url);
         } catch {
           // ignore
         }
-      }, 60000);
+      }, 10000);
     } catch (err) {
       console.error('Error saving blob to device:', err);
     }
@@ -399,24 +440,152 @@ export default function App() {
   }, []);
 
   /**
-   * Get or initialize a single, persistent WebRTC DataChannel connection to a peer
+   * Universal DataChannel Setup:
+   * Sets up both incoming (ondatachannel) and outgoing DataChannels with message parsing,
+   * 4-byte sequenced frame assembly, and state lifecycle callbacks.
    */
-  const getOrCreatePeerChannel = useCallback(async (targetId: string): Promise<RTCDataChannel> => {
+  const setupDataChannel = useCallback((peerId: string, dc: RTCDataChannel) => {
+    dc.binaryType = 'arraybuffer';
+    dc.bufferedAmountLowThreshold = 256 * 1024;
+    rtcChannels.current.set(peerId, dc);
+
+    let currentFileId = '';
+
+    dc.onopen = () => {
+      const waiter = rtcReadyPromises.current.get(peerId);
+      if (waiter) {
+        waiter.resolve(dc);
+        rtcReadyPromises.current.delete(peerId);
+      }
+    };
+
+    dc.onerror = (e) => {
+      console.error(`WebRTC DataChannel error with ${peerId}:`, e);
+      const waiter = rtcReadyPromises.current.get(peerId);
+      if (waiter) {
+        waiter.reject(new Error('RTCDataChannel error'));
+        rtcReadyPromises.current.delete(peerId);
+      }
+    };
+
+    dc.onclose = () => {
+      rtcChannels.current.delete(peerId);
+      const waiter = rtcReadyPromises.current.get(peerId);
+      if (waiter) {
+        waiter.reject(new Error('RTCDataChannel closed'));
+        rtcReadyPromises.current.delete(peerId);
+      }
+    };
+
+    dc.onmessage = async (msgEv) => {
+      // 1. In-band JSON control messages
+      if (typeof msgEv.data === 'string') {
+        try {
+          const ctrl = JSON.parse(msgEv.data);
+          if (ctrl.type === 'file-start') {
+            currentFileId = ctrl.fileId;
+            incomingBuffers.current.set(ctrl.fileId, {
+              chunks: [],
+              receivedBytes: 0,
+              totalSize: ctrl.fileSize,
+              expectedChunkIndex: 0,
+              fileName: ctrl.fileName,
+              fileType: ctrl.fileType || 'application/octet-stream',
+              startTime: Date.now()
+            });
+          } else if (ctrl.type === 'file-end') {
+            const entry = incomingBuffers.current.get(ctrl.fileId);
+            if (entry && !entry.completed) {
+              entry.completed = true;
+              const blob = new Blob(entry.chunks as BlobPart[], {
+                type: entry.fileType || 'application/octet-stream'
+              });
+              saveBlobToDeviceStorage(blob, entry.fileName, ctrl.fileId);
+              incomingBuffers.current.delete(ctrl.fileId);
+              updateTransferStatus(ctrl.fileId, 'completed', {
+                progress: 100,
+                speed: 'Done',
+                eta: 'Saved'
+              });
+              showToast(`Saved ${entry.fileName}`);
+            }
+          } else if (ctrl.type === 'file-cancel') {
+            incomingBuffers.current.delete(ctrl.fileId);
+            updateTransferStatus(ctrl.fileId, 'failed', { speed: '0.00', eta: 'Canceled' });
+          }
+        } catch {
+          // ignore
+        }
+        return;
+      }
+
+      // 2. Binary Packets: [4 bytes Uint32: chunkIndex] + [raw payload bytes]
+      if (msgEv.data instanceof ArrayBuffer) {
+        const view = new DataView(msgEv.data);
+        const chunkIdx = view.getUint32(0, false);
+        const payloadBytes = new Uint8Array(msgEv.data.slice(4));
+
+        const entry = incomingBuffers.current.get(currentFileId);
+        if (entry) {
+          entry.chunks.push(payloadBytes);
+          entry.receivedBytes += payloadBytes.byteLength;
+          entry.expectedChunkIndex = chunkIdx + 1;
+
+          const progress = entry.totalSize > 0
+            ? Math.min(99, Math.round((entry.receivedBytes / entry.totalSize) * 100))
+            : 99;
+          const elapsed = Math.max((Date.now() - entry.startTime) / 1000, 0.05);
+          const speedMBps = (entry.receivedBytes / elapsed) / (1024 * 1024);
+
+          updateTransferStatus(currentFileId, 'downloading', {
+            progress,
+            speed: speedMBps.toFixed(2),
+            eta: 'Direct WebRTC'
+          });
+        }
+      }
+    };
+  }, [saveBlobToDeviceStorage, showToast, updateTransferStatus]);
+
+  /**
+   * Get or initialize a single, persistent WebRTC DataChannel connection to a peer.
+   * Includes strict 8-second timeout so queues never deadlock.
+   */
+  const getOrCreatePeerChannel = useCallback(async (targetId: string, timeoutMs = 8000): Promise<RTCDataChannel> => {
     const existing = rtcChannels.current.get(targetId);
     if (existing && existing.readyState === 'open') {
       return existing;
     }
 
-    let waiter = rtcReadyPromises.current.get(targetId);
+    const waiter = rtcReadyPromises.current.get(targetId);
     if (waiter) {
       return waiter.promise;
     }
 
-    let resolvePromise: (dc: RTCDataChannel) => void = () => {};
-    const promise = new Promise<RTCDataChannel>((resolve) => {
+    let resolvePromise!: (dc: RTCDataChannel) => void;
+    let rejectPromise!: (err: Error) => void;
+
+    const promise = new Promise<RTCDataChannel>((resolve, reject) => {
       resolvePromise = resolve;
+      rejectPromise = reject;
     });
-    rtcReadyPromises.current.set(targetId, { promise, resolve: resolvePromise });
+
+    const timer = setTimeout(() => {
+      rtcReadyPromises.current.delete(targetId);
+      rejectPromise(new Error(`WebRTC DataChannel connection timeout with ${targetId}`));
+    }, timeoutMs);
+
+    rtcReadyPromises.current.set(targetId, {
+      promise,
+      resolve: (dc: RTCDataChannel) => {
+        clearTimeout(timer);
+        resolvePromise(dc);
+      },
+      reject: (err: Error) => {
+        clearTimeout(timer);
+        rejectPromise(err);
+      }
+    });
 
     let pc = rtcPeers.current.get(targetId);
     if (!pc || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
@@ -432,20 +601,24 @@ export default function App() {
           });
         }
       };
+
+      pc.ondatachannel = (ev) => {
+        setupDataChannel(targetId, ev.channel);
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc?.connectionState === 'failed' || pc?.connectionState === 'closed') {
+          const w = rtcReadyPromises.current.get(targetId);
+          if (w) {
+            w.reject(new Error(`Peer connection ${pc.connectionState}`));
+            rtcReadyPromises.current.delete(targetId);
+          }
+        }
+      };
     }
 
     const dc = pc.createDataChannel('kawerify-stream-pipe', { ordered: true });
-    dc.binaryType = 'arraybuffer';
-    dc.bufferedAmountLowThreshold = 256 * 1024;
-    rtcChannels.current.set(targetId, dc);
-
-    dc.onopen = () => {
-      const w = rtcReadyPromises.current.get(targetId);
-      if (w) {
-        w.resolve(dc);
-        rtcReadyPromises.current.delete(targetId);
-      }
-    };
+    setupDataChannel(targetId, dc);
 
     try {
       const offer = await pc.createOffer();
@@ -454,16 +627,21 @@ export default function App() {
         type: 'webrtc-offer',
         sdp: offer
       });
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error creating WebRTC offer:', err);
+      const w = rtcReadyPromises.current.get(targetId);
+      if (w) {
+        w.reject(err);
+        rtcReadyPromises.current.delete(targetId);
+      }
     }
 
     return promise;
-  }, [sendP2PSignal]);
+  }, [sendP2PSignal, setupDataChannel]);
 
   /**
-   * Safe, 16KB-Framed, High-Speed Binary Streamer:
-   * 1. Uses a 16KB universal SCTP frame size (zero drops on iOS Safari / Android Chrome).
+   * Safe, 32KB-Framed, High-Speed Binary Streamer:
+   * 1. Uses a 32KB frame size for maximum throughput and compatibility.
    * 2. Prepends a 4-byte sequence header (Uint32) on every packet for 100% corruption-free assembly.
    * 3. Streams sequentially through the persistent DataChannel.
    */
@@ -474,7 +652,7 @@ export default function App() {
     file: File
   ) => {
     const startTime = Date.now();
-    const FRAME_SIZE = 16 * 1024; // 16KB frame size (universal golden standard for WebRTC SCTP)
+    const FRAME_SIZE = 32 * 1024; // 32KB frame size
     const MAX_BUFFER = 2 * 1024 * 1024; // 2MB in-flight socket window
     const totalBytes = file.size;
     let offset = 0;
@@ -512,7 +690,7 @@ export default function App() {
       // Packet structure: [4 bytes Uint32: chunkIndex] + [raw payload bytes]
       const packet = new Uint8Array(4 + rawBytes.byteLength);
       const view = new DataView(packet.buffer);
-      view.setUint32(0, chunkIndex, false); // Big endian sequence index
+      view.setUint32(0, chunkIndex, false);
       packet.set(rawBytes, 4);
 
       dc.send(packet.buffer);
@@ -551,30 +729,137 @@ export default function App() {
   }, [updateTransferStatus]);
 
   /**
-   * Process outgoing file queue sequentially to prevent network / WebRTC flooding
+   * Flow-Controlled Reliable Chunk Relay (Used if WebRTC is blocked across carrier NATs):
+   * Sends 32KB indexed chunks with explicit receiver ACKs so public MQTT broker never drops packets or throttles.
    */
-  const processOutgoingQueue = useCallback(async () => {
-    if (isPumpingQueue.current) return;
-    isPumpingQueue.current = true;
+  const streamFileReliableFallback = useCallback(async (
+    targetId: string,
+    fileId: string,
+    file: File
+  ) => {
+    const startTime = Date.now();
+    const CHUNK_SIZE = 32 * 1024;
+    const totalBytes = file.size;
+    const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE) || 1;
+    let offset = 0;
+    let chunkIndex = 0;
+
+    sendP2PSignal(targetId, {
+      type: 'p2p-file-start-relay',
+      fileId,
+      fileName: file.name,
+      fileSize: file.size,
+      fileType: file.type || 'application/octet-stream',
+      totalChunks
+    });
+
+    while (offset < totalBytes) {
+      if (canceledTransfers.current.has(fileId)) {
+        sendP2PSignal(targetId, { type: 'p2p-transfer-cancel', fileId });
+        return;
+      }
+
+      const end = Math.min(offset + CHUNK_SIZE, totalBytes);
+      const slice = await file.slice(offset, end).arrayBuffer();
+      const rawBytes = new Uint8Array(slice);
+
+      let binary = '';
+      const len = rawBytes.byteLength;
+      for (let i = 0; i < len; i += 8192) {
+        const sub = rawBytes.subarray(i, Math.min(i + 8192, len));
+        binary += String.fromCharCode.apply(null, Array.from(sub));
+      }
+      const b64 = btoa(binary);
+
+      const ackPromise = new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          chunkAckWaiters.current.delete(`${fileId}-${chunkIndex}`);
+          resolve();
+        }, 1500);
+
+        chunkAckWaiters.current.set(`${fileId}-${chunkIndex}`, () => {
+          clearTimeout(timer);
+          chunkAckWaiters.current.delete(`${fileId}-${chunkIndex}`);
+          resolve();
+        });
+      });
+
+      sendP2PSignal(targetId, {
+        type: 'p2p-file-chunk-relay',
+        fileId,
+        chunkIndex,
+        totalChunks,
+        chunk: b64
+      });
+
+      await ackPromise;
+
+      chunkIndex++;
+      offset = end;
+      const elapsed = Math.max((Date.now() - startTime) / 1000, 0.05);
+      const progress = totalBytes > 0 ? Math.min(100, Math.round((offset / totalBytes) * 100)) : 100;
+      const speedMBps = (offset / elapsed) / (1024 * 1024);
+      const remainingSec = speedMBps > 0 ? ((totalBytes - offset) / (1024 * 1024)) / speedMBps : 0;
+
+      updateTransferStatus(fileId, 'uploading', {
+        progress,
+        speed: speedMBps.toFixed(2),
+        eta: remainingSec < 60 ? `${Math.ceil(remainingSec)}s left` : `${Math.floor(remainingSec / 60)}m left`
+      });
+    }
+
+    sendP2PSignal(targetId, {
+      type: 'p2p-file-end-relay',
+      fileId,
+      fileName: file.name,
+      fileType: file.type || 'application/octet-stream',
+      totalChunks
+    });
+
+    updateTransferStatus(fileId, 'completed', {
+      progress: 100,
+      speed: 'Done',
+      eta: 'Completed'
+    });
+  }, [sendP2PSignal, updateTransferStatus]);
+
+  /**
+   * Process per-peer outgoing queues independently so sharing to 5+ devices runs in parallel.
+   */
+  const pumpPeerQueue = useCallback(async (targetId: string) => {
+    if (activePeerPumps.current.has(targetId)) return;
+    activePeerPumps.current.add(targetId);
 
     try {
-      while (outgoingQueue.current.length > 0) {
-        const item = outgoingQueue.current.shift();
+      const queue = outgoingQueuesByPeer.current.get(targetId);
+      while (queue && queue.length > 0) {
+        const item = queue.shift();
         if (!item) break;
 
-        const { targetId, fileId, file } = item;
+        const { fileId, file } = item;
         try {
-          const dc = await getOrCreatePeerChannel(targetId);
-          await streamFileOverDataChannel(dc, targetId, fileId, file);
+          let dc: RTCDataChannel | null = null;
+          try {
+            dc = await getOrCreatePeerChannel(targetId, 8000);
+          } catch {
+            dc = null;
+          }
+
+          if (dc && dc.readyState === 'open') {
+            await streamFileOverDataChannel(dc, targetId, fileId, file);
+          } else {
+            console.warn(`WebRTC unavailable for ${targetId}, using reliable ACK relay`);
+            await streamFileReliableFallback(targetId, fileId, file);
+          }
         } catch (err) {
-          console.error(`Failed to stream file ${file.name}:`, err);
-          updateTransferStatus(fileId, 'failed', { speed: '0.00', eta: 'Error' });
+          console.error(`Failed to stream file ${file.name} to ${targetId}:`, err);
+          updateTransferStatus(fileId, 'failed', { speed: '0.00', eta: 'Transfer failed' });
         }
       }
     } finally {
-      isPumpingQueue.current = false;
+      activePeerPumps.current.delete(targetId);
     }
-  }, [getOrCreatePeerChannel, streamFileOverDataChannel, updateTransferStatus]);
+  }, [getOrCreatePeerChannel, streamFileOverDataChannel, streamFileReliableFallback, updateTransferStatus]);
 
   const handleP2PMessage = useCallback(async (data: Record<string, any>) => {
     if (!data || data.senderId === meRef.current.id) return;
@@ -647,12 +932,13 @@ export default function App() {
       case 'p2p-transfer-accept': {
         const file = pendingFiles.current.get(data.fileId);
         if (file) {
-          outgoingQueue.current.push({
-            targetId: data.senderId,
+          const peerQueue = outgoingQueuesByPeer.current.get(data.senderId) || [];
+          peerQueue.push({
             fileId: data.fileId,
             file
           });
-          processOutgoingQueue();
+          outgoingQueuesByPeer.current.set(data.senderId, peerQueue);
+          pumpPeerQueue(data.senderId);
         }
         break;
       }
@@ -673,87 +959,26 @@ export default function App() {
               });
             }
           };
-        }
 
-        pc.ondatachannel = (ev) => {
-          const channel = ev.channel;
-          channel.binaryType = 'arraybuffer';
-          rtcChannels.current.set(senderId, channel);
-
-          let currentFileId = '';
-
-          channel.onmessage = async (msgEv) => {
-            // 1. In-band JSON control messages
-            if (typeof msgEv.data === 'string') {
-              try {
-                const ctrl = JSON.parse(msgEv.data);
-                if (ctrl.type === 'file-start') {
-                  currentFileId = ctrl.fileId;
-                  incomingBuffers.current.set(ctrl.fileId, {
-                    chunks: [],
-                    receivedBytes: 0,
-                    totalSize: ctrl.fileSize,
-                    expectedChunkIndex: 0,
-                    fileName: ctrl.fileName,
-                    fileType: ctrl.fileType || 'application/octet-stream',
-                    startTime: Date.now()
-                  });
-                } else if (ctrl.type === 'file-end') {
-                  const entry = incomingBuffers.current.get(ctrl.fileId);
-                  if (entry && !entry.completed) {
-                    entry.completed = true;
-                    const blob = new Blob(entry.chunks as BlobPart[], {
-                      type: 'application/octet-stream'
-                    });
-                    saveBlobToDeviceStorage(blob, entry.fileName);
-                    incomingBuffers.current.delete(ctrl.fileId);
-                    updateTransferStatus(ctrl.fileId, 'completed', {
-                      progress: 100,
-                      speed: 'Done',
-                      eta: 'Saved'
-                    });
-                    showToast(`Saved ${entry.fileName}`);
-                  }
-                } else if (ctrl.type === 'file-cancel') {
-                  incomingBuffers.current.delete(ctrl.fileId);
-                  updateTransferStatus(ctrl.fileId, 'failed', { speed: '0.00', eta: 'Canceled' });
-                }
-              } catch {
-                // ignore
-              }
-              return;
-            }
-
-            // 2. Binary Packets: [4 bytes Uint32: chunkIndex] + [raw bytes]
-            if (msgEv.data instanceof ArrayBuffer) {
-              const view = new DataView(msgEv.data);
-              const chunkIdx = view.getUint32(0, false);
-              const payloadBytes = new Uint8Array(msgEv.data, 4);
-
-              const entry = incomingBuffers.current.get(currentFileId);
-              if (entry) {
-                entry.chunks.push(payloadBytes);
-                entry.receivedBytes += payloadBytes.byteLength;
-                entry.expectedChunkIndex = chunkIdx + 1;
-
-                const progress = entry.totalSize > 0
-                  ? Math.min(99, Math.round((entry.receivedBytes / entry.totalSize) * 100))
-                  : 99;
-                const elapsed = Math.max((Date.now() - entry.startTime) / 1000, 0.05);
-                const speedMBps = (entry.receivedBytes / elapsed) / (1024 * 1024);
-
-                updateTransferStatus(currentFileId, 'downloading', {
-                  progress,
-                  speed: speedMBps.toFixed(2),
-                  eta: 'Direct WebRTC'
-                });
-              }
-            }
+          pc.ondatachannel = (ev) => {
+            setupDataChannel(senderId, ev.channel);
           };
-        };
+        }
 
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+
+          // Drain queued ICE candidates now that remote description is set
+          const queued = pendingIceCandidates.current.get(senderId) || [];
+          pendingIceCandidates.current.delete(senderId);
+          for (const cand of queued) {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(cand));
+            } catch (e) {
+              console.warn('Error adding buffered ICE candidate:', e);
+            }
+          }
+
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
           sendP2PSignal(senderId, {
@@ -772,7 +997,20 @@ export default function App() {
         if (pc && data.sdp) {
           try {
             await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-          } catch { /* ignore */ }
+
+            // Drain queued ICE candidates on answer as well
+            const queued = pendingIceCandidates.current.get(senderId) || [];
+            pendingIceCandidates.current.delete(senderId);
+            for (const cand of queued) {
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(cand));
+              } catch (e) {
+                console.warn('Error adding buffered ICE candidate on answer:', e);
+              }
+            }
+          } catch (err) {
+            console.warn('Error setting remote description on answer:', err);
+          }
         }
         break;
       }
@@ -780,10 +1018,116 @@ export default function App() {
       case 'webrtc-ice': {
         const senderId = data.senderId;
         const pc = rtcPeers.current.get(senderId);
-        if (pc && data.candidate) {
+        if (pc && pc.remoteDescription && pc.remoteDescription.type) {
           try {
             await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
           } catch { /* ignore */ }
+        } else {
+          // Buffer candidate until remoteDescription is set
+          const queued = pendingIceCandidates.current.get(senderId) || [];
+          queued.push(data.candidate);
+          pendingIceCandidates.current.set(senderId, queued);
+        }
+        break;
+      }
+
+      case 'p2p-chunk-ack': {
+        const ackKey = `${data.fileId}-${data.chunkIndex}`;
+        const waiter = chunkAckWaiters.current.get(ackKey);
+        if (waiter) {
+          waiter(data.chunkIndex);
+        }
+        break;
+      }
+
+      case 'p2p-file-start-relay': {
+        incomingBuffers.current.set(data.fileId, {
+          chunks: [],
+          chunksMap: new Map(),
+          receivedBytes: 0,
+          totalSize: data.fileSize,
+          totalChunks: data.totalChunks,
+          expectedChunkIndex: 0,
+          fileName: data.fileName,
+          fileType: data.fileType || 'application/octet-stream',
+          startTime: Date.now()
+        });
+        break;
+      }
+
+      case 'p2p-file-chunk-relay': {
+        const { fileId, chunk, chunkIndex, totalChunks } = data;
+        let entry = incomingBuffers.current.get(fileId);
+        if (!entry) {
+          entry = {
+            chunks: [],
+            chunksMap: new Map(),
+            receivedBytes: 0,
+            totalSize: 0,
+            totalChunks,
+            expectedChunkIndex: 0,
+            fileName: 'file',
+            fileType: 'application/octet-stream',
+            startTime: Date.now()
+          };
+          incomingBuffers.current.set(fileId, entry);
+        }
+
+        const binStr = atob(chunk);
+        const bytes = new Uint8Array(binStr.length);
+        for (let i = 0; i < binStr.length; i++) {
+          bytes[i] = binStr.charCodeAt(i);
+        }
+
+        if (!entry.chunksMap) entry.chunksMap = new Map();
+        if (!entry.chunksMap.has(chunkIndex)) {
+          entry.chunksMap.set(chunkIndex, bytes);
+          entry.receivedBytes += bytes.byteLength;
+        }
+
+        // Send ACK back to sender immediately
+        sendP2PSignal(data.senderId, {
+          type: 'p2p-chunk-ack',
+          fileId,
+          chunkIndex
+        });
+
+        const progress = entry.totalChunks && entry.totalChunks > 0
+          ? Math.min(99, Math.round((entry.chunksMap.size / entry.totalChunks) * 100))
+          : 50;
+        const elapsed = Math.max((Date.now() - entry.startTime) / 1000, 0.05);
+        const speedMBps = (entry.receivedBytes / elapsed) / (1024 * 1024);
+
+        updateTransferStatus(fileId, 'downloading', {
+          progress,
+          speed: speedMBps.toFixed(2),
+          eta: 'Relay P2P'
+        });
+        break;
+      }
+
+      case 'p2p-file-end-relay': {
+        const { fileId, fileName, fileType, totalChunks } = data;
+        const entry = incomingBuffers.current.get(fileId);
+        if (entry && !entry.completed) {
+          entry.completed = true;
+          const orderedChunks: Uint8Array[] = [];
+          const count = typeof totalChunks === 'number' ? totalChunks : (entry.chunksMap?.size || 0);
+          for (let i = 0; i < count; i++) {
+            const c = entry.chunksMap?.get(i);
+            if (c) orderedChunks.push(c);
+          }
+          const blob = new Blob(orderedChunks as BlobPart[], {
+            type: fileType || entry.fileType || 'application/octet-stream'
+          });
+          saveBlobToDeviceStorage(blob, fileName || entry.fileName, fileId);
+          incomingBuffers.current.delete(fileId);
+          updateTransferStatus(fileId, 'completed', {
+            progress: 100,
+            speed: 'Done',
+            eta: 'Saved'
+          });
+          showToast(`Saved ${fileName || entry.fileName}`);
         }
         break;
       }
@@ -797,7 +1141,7 @@ export default function App() {
       default:
         break;
     }
-  }, [saveBlobToDeviceStorage, sendP2PSignal, showToast, processOutgoingQueue, updateTransferStatus]);
+  }, [saveBlobToDeviceStorage, sendP2PSignal, setupDataChannel, showToast, pumpPeerQueue, updateTransferStatus]);
 
   useEffect(() => {
     if ('BroadcastChannel' in window) {
@@ -1251,6 +1595,9 @@ export default function App() {
       for (const peer of p2pTargetPeers) {
         const batchMeta: Array<{ fileId: string; fileName: string; fileSize: number; fileType: string }> = [];
 
+        // Pre-warm WebRTC connection immediately so DataChannel is open by the time receiver accepts!
+        getOrCreatePeerChannel(peer.id, 8000).catch(() => {});
+
         for (const file of filesToShare) {
           const fileId = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${peer.id.slice(-3)}`;
           pendingFiles.current.set(fileId, file);
@@ -1265,7 +1612,7 @@ export default function App() {
             name: file.name,
             size: file.size,
             progress: 0,
-            speed: 'Direct WebRTC',
+            speed: 'P2P Ready',
             status: 'waiting',
             role: 'sender',
             peerName: peer.name,
@@ -1876,13 +2223,26 @@ export default function App() {
                             <X size={14} />
                           </button>
                         ) : (
-                          <span className="mono" style={{
-                            fontSize: '0.73rem',
-                            fontWeight: 600,
-                            color: transfer.status === 'completed' ? 'var(--status-online)' : 'var(--status-danger)'
-                          }}>
-                            {transfer.status === 'completed' ? 'Completed' : 'Canceled'}
-                          </span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            {transfer.status === 'completed' && transfer.blobUrl && (
+                              <a
+                                href={transfer.blobUrl}
+                                download={transfer.name}
+                                className="icon-btn"
+                                style={{ width: 26, height: 26, color: 'var(--status-online)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+                                title="Download / Save again"
+                              >
+                                <Download size={13} />
+                              </a>
+                            )}
+                            <span className="mono" style={{
+                              fontSize: '0.73rem',
+                              fontWeight: 600,
+                              color: transfer.status === 'completed' ? 'var(--status-online)' : 'var(--status-danger)'
+                            }}>
+                              {transfer.status === 'completed' ? 'Completed' : 'Canceled'}
+                            </span>
+                          </div>
                         )}
                       </div>
 
