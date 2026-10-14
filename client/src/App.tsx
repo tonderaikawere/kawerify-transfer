@@ -17,8 +17,7 @@ import {
   Moon,
   ArrowUpRight,
   Users,
-  Hash,
-  ShieldCheck
+  Hash
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import mqtt from 'mqtt';
@@ -189,6 +188,7 @@ export default function App() {
   const [qrCodeUrl, setQrCodeUrl] = useState<string>('');
   const [incomingQueue, setIncomingQueue] = useState<IncomingOffer[]>([]);
   const [autoAccept, setAutoAccept] = useState<boolean>(true);
+  const [autoSend, setAutoSend] = useState<boolean>(true);
   const [isDragActive, setIsDragActive] = useState<boolean>(false);
 
   const ws = useRef<WebSocket | null>(null);
@@ -201,6 +201,9 @@ export default function App() {
   const pendingFiles = useRef<Map<string, File>>(new Map());
   const incomingBuffers = useRef<Map<string, IncomingStreamState>>(new Map());
   const wakeLockRef = useRef<any>(null);
+
+  // Track discovered peers to announce when someone joins
+  const knownPeersRef = useRef<Set<string>>(new Set());
 
   // Single persistent RTCPeerConnection and RTCDataChannel per target peer
   const rtcPeers = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -324,6 +327,21 @@ export default function App() {
     setToast(message);
     setTimeout(() => setToast(''), 3000);
   }, []);
+
+  const announcePeerJoined = useCallback((peerName: string) => {
+    showToast(`👋 ${peerName} joined the room`);
+    if ('speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(`${peerName} joined`);
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        window.speechSynthesis.speak(utterance);
+      } catch {
+        // ignore
+      }
+    }
+  }, [showToast]);
 
   const updateTransferStatus = useCallback((
     id: string,
@@ -861,11 +879,81 @@ export default function App() {
     }
   }, [getOrCreatePeerChannel, streamFileOverDataChannel, streamFileReliableFallback, updateTransferStatus]);
 
+  const acceptSingleOffer = useCallback(async (transfer: IncomingOffer) => {
+    const newTransfer: Transfer = {
+      id: transfer.fileId,
+      name: transfer.fileName,
+      size: transfer.fileSize,
+      progress: transfer.transport === 'local-ws' ? 50 : 1,
+      speed: '--',
+      status: 'downloading',
+      role: 'receiver',
+      peerName: transfer.senderName,
+      eta: 'Streaming...'
+    };
+
+    setTransfers(prev => [newTransfer, ...prev]);
+
+    if (transfer.transport === 'local-ws') {
+      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        ws.current.send(JSON.stringify({
+          type: 'transfer-accept',
+          senderId: transfer.senderId,
+          fileId: transfer.fileId
+        }));
+      }
+
+      const link = document.createElement('a');
+      link.href = `${serverUrl}/api/download/${transfer.fileId}`;
+      link.download = transfer.fileName;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => {
+        try {
+          document.body.removeChild(link);
+        } catch {
+          // ignore
+        }
+      }, 30000);
+
+      setTimeout(() => {
+        updateTransferStatus(transfer.fileId, 'completed', {
+          progress: 100,
+          speed: 'Done',
+          eta: 'Saved'
+        });
+      }, 1500);
+    } else {
+      incomingBuffers.current.set(transfer.fileId, {
+        chunks: [],
+        receivedBytes: 0,
+        totalSize: transfer.fileSize,
+        expectedChunkIndex: 0,
+        fileName: transfer.fileName,
+        fileType: transfer.fileType || 'application/octet-stream',
+        startTime: Date.now()
+      });
+
+      sendP2PSignal(transfer.senderId, {
+        type: 'p2p-transfer-accept',
+        fileId: transfer.fileId
+      });
+    }
+  }, [sendP2PSignal, serverUrl, updateTransferStatus]);
+
   const handleP2PMessage = useCallback(async (data: Record<string, any>) => {
     if (!data || data.senderId === meRef.current.id) return;
 
     switch (data.type) {
       case 'presence': {
+        const isNew = !knownPeersRef.current.has(data.senderId);
+        knownPeersRef.current.add(data.senderId);
+
+        if (isNew && data.senderId !== meRef.current.id) {
+          announcePeerJoined(data.senderName || 'Nearby Device');
+        }
+
         setMeshPeers(prev => {
           const next = new Map(prev);
           next.set(data.senderId, {
@@ -888,44 +976,46 @@ export default function App() {
       }
 
       case 'p2p-transfer-offer': {
-        setIncomingQueue(prev => {
-          if (prev.some(item => item.fileId === data.fileId)) return prev;
-          return [
-            ...prev,
-            {
-              senderId: data.senderId,
-              senderName: data.senderName,
-              fileId: data.fileId,
-              fileName: data.fileName,
-              fileSize: data.fileSize,
-              fileType: data.fileType,
-              transport: 'p2p-mesh'
-            }
-          ];
-        });
+        const offer: IncomingOffer = {
+          senderId: data.senderId,
+          senderName: data.senderName,
+          fileId: data.fileId,
+          fileName: data.fileName,
+          fileSize: data.fileSize,
+          fileType: data.fileType,
+          transport: 'p2p-mesh'
+        };
+        if (autoAccept) {
+          acceptSingleOffer(offer);
+        } else {
+          setIncomingQueue(prev => prev.some(item => item.fileId === data.fileId) ? prev : [...prev, offer]);
+        }
         break;
       }
 
       case 'p2p-transfer-offer-batch': {
         const incomingFiles = Array.isArray(data.files) ? data.files : [];
-        setIncomingQueue(prev => {
-          const existingIds = new Set(prev.map(i => i.fileId));
-          const additions: IncomingOffer[] = [];
-          for (const f of incomingFiles) {
-            if (!existingIds.has(f.fileId)) {
-              additions.push({
-                senderId: data.senderId,
-                senderName: data.senderName,
-                fileId: f.fileId,
-                fileName: f.fileName,
-                fileSize: f.fileSize,
-                fileType: f.fileType,
-                transport: 'p2p-mesh'
-              });
-            }
-          }
-          return [...prev, ...additions];
-        });
+        const additions: IncomingOffer[] = incomingFiles.map((f: any) => ({
+          senderId: data.senderId,
+          senderName: data.senderName,
+          fileId: f.fileId,
+          fileName: f.fileName,
+          fileSize: f.fileSize,
+          fileType: f.fileType,
+          transport: 'p2p-mesh' as const
+        }));
+
+        if (autoAccept) {
+          additions.forEach((offer, idx) => {
+            setTimeout(() => acceptSingleOffer(offer), idx * 40);
+          });
+        } else {
+          setIncomingQueue(prev => {
+            const existingIds = new Set(prev.map(i => i.fileId));
+            const fresh = additions.filter(a => !existingIds.has(a.fileId));
+            return [...prev, ...fresh];
+          });
+        }
         break;
       }
 
@@ -1141,7 +1231,7 @@ export default function App() {
       default:
         break;
     }
-  }, [saveBlobToDeviceStorage, sendP2PSignal, setupDataChannel, showToast, pumpPeerQueue, updateTransferStatus]);
+  }, [saveBlobToDeviceStorage, sendP2PSignal, setupDataChannel, showToast, pumpPeerQueue, updateTransferStatus, announcePeerJoined, autoAccept, acceptSingleOffer]);
 
   useEffect(() => {
     if ('BroadcastChannel' in window) {
@@ -1232,29 +1322,44 @@ export default function App() {
               case 'welcome':
                 setMe(prev => ({ ...prev, id: data.peer.id }));
                 break;
-              case 'peers-update':
-                setLocalPeers(data.peers || []);
+              case 'peers-update': {
+                const incomingPeers: Peer[] = data.peers || [];
+                for (const p of incomingPeers) {
+                  if (p.id !== meRef.current.id && !knownPeersRef.current.has(p.id)) {
+                    knownPeersRef.current.add(p.id);
+                    announcePeerJoined(p.name || 'Nearby Device');
+                  }
+                }
+                setLocalPeers(incomingPeers);
                 break;
-              case 'transfer-offer':
-                setIncomingQueue(prev => [
-                  ...prev,
-                  { ...data, transport: 'local-ws' }
-                ]);
+              }
+              case 'transfer-offer': {
+                const offer: IncomingOffer = { ...data, transport: 'local-ws' };
+                if (autoAccept) {
+                  acceptSingleOffer(offer);
+                } else {
+                  setIncomingQueue(prev => [...prev, offer]);
+                }
                 break;
+              }
               case 'transfer-offer-batch': {
                 const batchFiles = Array.isArray(data.files) ? data.files : [];
-                setIncomingQueue(prev => [
-                  ...prev,
-                  ...batchFiles.map((f: any) => ({
-                    senderId: data.senderId,
-                    senderName: data.senderName,
-                    fileId: f.fileId,
-                    fileName: f.fileName,
-                    fileSize: f.fileSize,
-                    fileType: f.fileType,
-                    transport: 'local-ws' as const
-                  }))
-                ]);
+                const offers: IncomingOffer[] = batchFiles.map((f: any) => ({
+                  senderId: data.senderId,
+                  senderName: data.senderName,
+                  fileId: f.fileId,
+                  fileName: f.fileName,
+                  fileSize: f.fileSize,
+                  fileType: f.fileType,
+                  transport: 'local-ws' as const
+                }));
+                if (autoAccept) {
+                  offers.forEach((offer, idx) => {
+                    setTimeout(() => acceptSingleOffer(offer), idx * 40);
+                  });
+                } else {
+                  setIncomingQueue(prev => [...prev, ...offers]);
+                }
                 break;
               }
               case 'transfer-accepted':
@@ -1296,70 +1401,7 @@ export default function App() {
       clearTimeout(reconnectTimer);
       if (ws.current) ws.current.close();
     };
-  }, [isLocalNetworkHost, updateTransferStatus, wsUrl]);
-
-  const acceptSingleOffer = useCallback(async (transfer: IncomingOffer) => {
-    const newTransfer: Transfer = {
-      id: transfer.fileId,
-      name: transfer.fileName,
-      size: transfer.fileSize,
-      progress: transfer.transport === 'local-ws' ? 50 : 1,
-      speed: '--',
-      status: 'downloading',
-      role: 'receiver',
-      peerName: transfer.senderName,
-      eta: 'Streaming...'
-    };
-
-    setTransfers(prev => [newTransfer, ...prev]);
-
-    if (transfer.transport === 'local-ws') {
-      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-        ws.current.send(JSON.stringify({
-          type: 'transfer-accept',
-          senderId: transfer.senderId,
-          fileId: transfer.fileId
-        }));
-      }
-
-      const link = document.createElement('a');
-      link.href = `${serverUrl}/api/download/${transfer.fileId}`;
-      link.download = transfer.fileName;
-      link.style.display = 'none';
-      document.body.appendChild(link);
-      link.click();
-      setTimeout(() => {
-        try {
-          document.body.removeChild(link);
-        } catch {
-          // ignore
-        }
-      }, 30000);
-
-      setTimeout(() => {
-        updateTransferStatus(transfer.fileId, 'completed', {
-          progress: 100,
-          speed: 'Done',
-          eta: 'Saved'
-        });
-      }, 1500);
-    } else {
-      incomingBuffers.current.set(transfer.fileId, {
-        chunks: [],
-        receivedBytes: 0,
-        totalSize: transfer.fileSize,
-        expectedChunkIndex: 0,
-        fileName: transfer.fileName,
-        fileType: transfer.fileType || 'application/octet-stream',
-        startTime: Date.now()
-      });
-
-      sendP2PSignal(transfer.senderId, {
-        type: 'p2p-transfer-accept',
-        fileId: transfer.fileId
-      });
-    }
-  }, [sendP2PSignal, serverUrl, updateTransferStatus]);
+  }, [isLocalNetworkHost, updateTransferStatus, wsUrl, autoAccept, acceptSingleOffer, announcePeerJoined]);
 
   useEffect(() => {
     if (autoAccept && incomingQueue.length > 0) {
@@ -1420,67 +1462,18 @@ export default function App() {
     }
   };
 
-  const appendFilesToQueue = (newFiles: File[]) => {
-    if (!newFiles || newFiles.length === 0) return;
-    setSelectedFiles(prev => [...prev, ...newFiles]);
-  };
-
-  const handleDrag = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === 'dragenter' || e.type === 'dragover') {
-      setIsDragActive(true);
-    } else if (e.type === 'dragleave') {
-      setIsDragActive(false);
+  const executeSendFiles = useCallback((filesToShare: File[], targetPeerIds?: string[]) => {
+    if (!filesToShare || filesToShare.length === 0) return;
+    const recipientIds = targetPeerIds && targetPeerIds.length > 0 ? targetPeerIds : selectedPeerIds;
+    let targetPeers = peers.filter(p => recipientIds.includes(p.id));
+    if (targetPeers.length === 0 && peers.length > 0) {
+      targetPeers = [...peers];
     }
-  };
-
-  const handleDrop = async (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragActive(false);
-
-    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
-      const extracted = await extractFilesFromDataTransfer(e.dataTransfer.items);
-      if (extracted.length > 0) {
-        appendFilesToQueue(extracted);
-        return;
-      }
-    }
-
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      appendFilesToQueue(Array.from(e.dataTransfer.files));
-    }
-  };
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      appendFilesToQueue(Array.from(e.target.files));
-      e.target.value = '';
-    }
-  };
-
-  const triggerFileInput = () => {
-    fileInputRef.current?.click();
-  };
-
-  const triggerFolderInput = () => {
-    folderInputRef.current?.click();
-  };
-
-  const removeFileAtIndex = (index: number) => {
-    setSelectedFiles(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const handleSendFiles = () => {
-    if (selectedFiles.length === 0 || selectedPeerIds.length === 0) {
-      showToast('Select files and at least one destination device');
+    if (targetPeers.length === 0) {
+      setSelectedFiles(prev => [...prev, ...filesToShare]);
+      showToast(`Queued ${filesToShare.length} file(s). Waiting for devices to join...`);
       return;
     }
-
-    const filesToShare = [...selectedFiles];
-    const targetPeers = peers.filter(p => selectedPeerIds.includes(p.id));
-    if (targetPeers.length === 0) return;
 
     const localTargetPeers = targetPeers.filter(p => wsConnected && p.transport === 'local-ws');
     const p2pTargetPeers = targetPeers.filter(p => !(wsConnected && p.transport === 'local-ws'));
@@ -1492,7 +1485,7 @@ export default function App() {
         : `${localTargetPeers.length} devices`;
 
       let cursor = 0;
-      const CONCURRENCY = 2; // Controlled concurrency to prevent socket lockup
+      const CONCURRENCY = 2;
 
       const uploadWorker = () => {
         while (cursor < filesToShare.length) {
@@ -1595,7 +1588,6 @@ export default function App() {
       for (const peer of p2pTargetPeers) {
         const batchMeta: Array<{ fileId: string; fileName: string; fileSize: number; fileType: string }> = [];
 
-        // Pre-warm WebRTC connection immediately so DataChannel is open by the time receiver accepts!
         getOrCreatePeerChannel(peer.id, 8000).catch(() => {});
 
         for (const file of filesToShare) {
@@ -1632,8 +1624,77 @@ export default function App() {
       setTransfers(prev => [...newRows, ...prev]);
     }
 
-    showToast(`Queued ${filesToShare.length} file(s) for sending`);
+    showToast(`Sending ${filesToShare.length} file(s) to ${targetPeers.length} device(s)`);
     setSelectedFiles([]);
+  }, [peers, selectedPeerIds, wsConnected, serverUrl, updateTransferStatus, getOrCreatePeerChannel, sendP2PSignal, showToast]);
+
+  const appendFilesToQueue = (newFiles: File[]) => {
+    if (!newFiles || newFiles.length === 0) return;
+    if (autoSend && peers.length > 0) {
+      executeSendFiles(newFiles);
+    } else {
+      setSelectedFiles(prev => [...prev, ...newFiles]);
+      if (peers.length === 0) {
+        showToast(`Queued ${newFiles.length} file(s). Waiting for someone to join...`);
+      } else {
+        showToast(`Added ${newFiles.length} file(s) to send`);
+      }
+    }
+  };
+
+  const handleDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setIsDragActive(true);
+    } else if (e.type === 'dragleave') {
+      setIsDragActive(false);
+    }
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragActive(false);
+
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      const extracted = await extractFilesFromDataTransfer(e.dataTransfer.items);
+      if (extracted.length > 0) {
+        appendFilesToQueue(extracted);
+        return;
+      }
+    }
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      appendFilesToQueue(Array.from(e.dataTransfer.files));
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      appendFilesToQueue(Array.from(e.target.files));
+      e.target.value = '';
+    }
+  };
+
+  const triggerFileInput = () => {
+    fileInputRef.current?.click();
+  };
+
+  const triggerFolderInput = () => {
+    folderInputRef.current?.click();
+  };
+
+  const removeFileAtIndex = (index: number) => {
+    setSelectedFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleSendFiles = () => {
+    if (selectedFiles.length === 0) {
+      showToast('Select files to send');
+      return;
+    }
+    executeSendFiles(selectedFiles);
   };
 
   const incomingTransfer = incomingQueue[0] || null;
@@ -1881,8 +1942,10 @@ export default function App() {
           <section className="card">
             <div className="card-header">
               <div className="card-title-group">
-                <span className="card-title">Nearby Devices</span>
-                <span className="transport-tag mono">{peers.length}</span>
+                <span className="card-title">People in Room</span>
+                <span className="transport-tag mono" style={{ background: 'var(--status-online-soft)', color: 'var(--status-online)' }}>
+                  {peers.length + 1} {peers.length === 0 ? 'Person' : 'People'} • {roomCode}
+                </span>
               </div>
 
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
@@ -1900,9 +1963,9 @@ export default function App() {
                   onClick={() => {
                     sendP2PSignal('broadcast', { type: 'presence' });
                     sendP2PSignal('broadcast', { type: 'presence-request' });
-                    showToast('Scanning for nearby devices...');
+                    showToast('Scanning room members...');
                   }}
-                  title="Refresh device list"
+                  title="Refresh room members"
                 >
                   <RefreshCw size={13} />
                 </button>
@@ -1910,10 +1973,31 @@ export default function App() {
             </div>
 
             <div className="card-body">
+              {/* This Device in the Room */}
+              <div className="peer-card selected" style={{ borderLeft: '3px solid var(--accent-primary)', marginBottom: '0.65rem' }}>
+                <div className="peer-card-left">
+                  <div className="peer-icon-box" style={{ background: 'var(--accent-primary-soft)', color: 'var(--accent-primary)' }}>
+                    {renderDeviceIcon(me.deviceType, 18)}
+                  </div>
+                  <div style={{ minWidth: 0 }}>
+                    <div className="peer-card-name" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <span>{me.name}</span>
+                      <span className="mono" style={{ fontSize: '0.68rem', padding: '1px 6px', borderRadius: 4, background: 'var(--accent-primary-soft)', color: 'var(--accent-primary)' }}>You</span>
+                    </div>
+                    <div className="peer-card-meta">
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                        <span className="status-dot online" style={{ width: 6, height: 6 }} /> Active in Room {roomCode}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <span className="transport-tag mono">Your Device</span>
+              </div>
+
               {peers.length > 0 ? (
                 <>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.65rem' }}>
-                    Select 1, 5, or all devices below to broadcast files simultaneously:
+                    Other people in Room {roomCode}:
                   </div>
                   <div className="peers-grid">
                     {peers.map((peer) => {
@@ -1932,7 +2016,10 @@ export default function App() {
                               {renderDeviceIcon(peer.deviceType, 18)}
                             </div>
                             <div style={{ minWidth: 0 }}>
-                              <div className="peer-card-name">{peer.name}</div>
+                              <div className="peer-card-name" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                                <span>{peer.name}</span>
+                                <span className="status-dot online" style={{ width: 6, height: 6 }} />
+                              </div>
                               <div className="peer-card-meta">
                                 <span>{peer.deviceType || 'Laptop / Desktop'}</span>
                                 <span>•</span>
@@ -1941,7 +2028,7 @@ export default function App() {
                             </div>
                           </div>
                           <span className="transport-tag">
-                            {isSelected ? 'Selected' : 'Select'}
+                            {isSelected ? 'Targeted' : 'Select'}
                           </span>
                         </div>
                       );
@@ -1949,15 +2036,15 @@ export default function App() {
                   </div>
                 </>
               ) : (
-                <div className="empty-radar">
+                <div className="empty-radar" style={{ marginTop: '0.5rem' }}>
                   <div className="radar-circles">
                     <Radio size={20} />
                   </div>
                   <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                    Searching for nearby devices
+                    Waiting for others to join Room {roomCode}
                   </div>
-                  <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', maxWidth: '270px' }}>
-                    Open this app on other laptops or phones (using the same Room Code or Wi-Fi) to share to 1 or 5+ devices at once.
+                  <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', maxWidth: '280px' }}>
+                    Share your Room Code <strong>{roomCode}</strong> or copy the link above. As soon as someone opens it, Kawerify announces them and begins streaming!
                   </p>
                 </div>
               )}
@@ -1974,9 +2061,32 @@ export default function App() {
                   <span className="transport-tag mono">{selectedFiles.length} files</span>
                 )}
               </div>
-              <span className="card-subtitle mono" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
-                <ShieldCheck size={13} style={{ color: 'var(--status-online)' }} /> Background Keep-Alive • Bit-for-Bit Stream
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className={`btn btn-sm ${autoSend ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 999 }}
+                  onClick={() => {
+                    setAutoSend(prev => !prev);
+                    showToast(!autoSend ? '⚡ Auto-Send enabled: files stream immediately upon drop/select' : 'Auto-Send paused');
+                  }}
+                  title="Automatically send files as soon as they are added"
+                >
+                  ⚡ Auto-Send: {autoSend ? 'ON' : 'OFF'}
+                </button>
+                <button
+                  type="button"
+                  className={`btn btn-sm ${autoAccept ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 999 }}
+                  onClick={() => {
+                    setAutoAccept(prev => !prev);
+                    showToast(!autoAccept ? '🛡️ Auto-Accept enabled: incoming files save automatically' : 'Auto-Accept paused');
+                  }}
+                  title="Automatically accept and save incoming files without prompt"
+                >
+                  🛡️ Auto-Accept: {autoAccept ? 'ON' : 'OFF'}
+                </button>
+              </div>
             </div>
 
             <div className="card-body">
@@ -2008,9 +2118,13 @@ export default function App() {
                   <div className="dropzone-icon">
                     <FolderOpen size={20} />
                   </div>
-                  <div className="dropzone-title">Select 100+ files, folders, or drag & drop here</div>
+                  <div className="dropzone-title">
+                    {autoSend ? 'Drop or select files to send immediately' : 'Select 100+ files, folders, or drag & drop here'}
+                  </div>
                   <div className="dropzone-hint">
-                    Original files are transferred with verified sequential 16KB frames and zero cloud throttling
+                    {autoSend
+                      ? `⚡ Auto-Send is ON: files stream directly to everyone in Room ${roomCode} without needing to accept`
+                      : 'Bit-for-bit uncompressed transfer with background keep-alive'}
                   </div>
                   <div
                     style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap', justifyContent: 'center' }}
