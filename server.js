@@ -207,6 +207,7 @@ wss.on('connection', (ws) => {
             const current = peers.get(peerId);
             if (current) {
               current.state.name = data.name.trim().substring(0, 24);
+              if (data.avatar) current.state.avatar = data.avatar;
               if (data.deviceType) current.state.deviceType = data.deviceType;
               broadcastPeers();
             }

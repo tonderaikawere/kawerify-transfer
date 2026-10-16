@@ -10,14 +10,19 @@ import {
   Plus,
   RefreshCw,
   FileText,
-  Laptop,
-  Smartphone,
   Radio,
   Sun,
   Moon,
   ArrowUpRight,
   Users,
-  Hash
+  Hash,
+  User,
+  Edit2,
+  HardDrive,
+  Volume2,
+  VolumeX,
+  ArrowDown,
+  ArrowUp
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import mqtt from 'mqtt';
@@ -81,27 +86,53 @@ const RTC_CONFIG: RTCConfiguration = {
   iceCandidatePoolSize: 10
 };
 
-const ADJECTIVES = ['North', 'Cobalt', 'Amber', 'Cedar', 'Lunar', 'Sol', 'Vertex', 'Quartz', 'Metro', 'Atlas', 'Prime'];
-const NOUNS = ['MacBook', 'ThinkPad', 'Workstation', 'Laptop', 'Studio', 'Desktop'];
+const AVATAR_LIST = [
+  { id: 1, label: 'Laptop', icon: '💻' },
+  { id: 2, label: 'Phone', icon: '📱' },
+  { id: 3, label: 'Rocket', icon: '🚀' },
+  { id: 4, label: 'Lightning', icon: '⚡' },
+  { id: 5, label: 'Cat', icon: '🐱' },
+  { id: 6, label: 'Fox', icon: '🦊' },
+  { id: 7, label: 'Lion', icon: '🦁' },
+  { id: 8, label: 'Panda', icon: '🐼' },
+  { id: 9, label: 'Gamepad', icon: '🎮' },
+  { id: 10, label: 'Shield', icon: '🛡️' }
+];
 
 function createLocalIdentity(): Peer {
-  const saved = sessionStorage.getItem('kawerify_peer_identity');
-  if (saved) {
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  let id = `peer-${Math.random().toString(36).substring(2, 9)}`;
+
+  const savedPeer = sessionStorage.getItem('kawerify_peer_identity');
+  if (savedPeer) {
     try {
-      return JSON.parse(saved);
+      const parsed = JSON.parse(savedPeer);
+      if (parsed.id) id = parsed.id;
     } catch {
       // ignore
     }
   }
-  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-  const noun = isMobile ? 'Phone' : NOUNS[Math.floor(Math.random() * NOUNS.length)];
-  const num = Math.floor(Math.random() * 90) + 10;
+
+  const savedCustomName = localStorage.getItem('kawerify_custom_name');
+  const savedAvatar = localStorage.getItem('kawerify_custom_avatar');
+
+  let defaultName = 'My Device';
+  if (/iPhone/i.test(navigator.userAgent)) defaultName = 'My iPhone';
+  else if (/iPad/i.test(navigator.userAgent)) defaultName = 'My iPad';
+  else if (/Android/i.test(navigator.userAgent)) defaultName = 'My Android';
+  else if (/Macintosh|Mac OS/i.test(navigator.userAgent)) defaultName = 'My MacBook';
+  else if (/Windows/i.test(navigator.userAgent)) defaultName = 'My PC';
+  else if (/Linux/i.test(navigator.userAgent)) defaultName = 'My Linux';
+
+  const name = (savedCustomName && savedCustomName.trim()) ? savedCustomName.trim() : defaultName;
+  const avatar = savedAvatar ? parseInt(savedAvatar, 10) : (isMobile ? 2 : 1);
+  const deviceType = isMobile ? 'Mobile Phone' : 'Laptop / Desktop';
+
   const identity: Peer = {
-    id: `peer-${Math.random().toString(36).substring(2, 9)}`,
-    name: `${adj} ${noun}-${num}`,
-    avatar: isMobile ? 2 : 1,
-    deviceType: isMobile ? 'Mobile Phone' : 'Laptop / Desktop'
+    id,
+    name,
+    avatar,
+    deviceType
   };
   sessionStorage.setItem('kawerify_peer_identity', JSON.stringify(identity));
   return identity;
@@ -164,15 +195,27 @@ export default function App() {
     const saved = localStorage.getItem('kawerify_theme');
     return saved === 'light' ? 'light' : 'dark';
   });
-  const [me, setMe] = useState<Peer>(() => createLocalIdentity());
-  const [customName, setCustomName] = useState<string>(() => createLocalIdentity().name);
+  const [initialIdentity] = useState<Peer>(() => createLocalIdentity());
+  const [me, setMe] = useState<Peer>(initialIdentity);
+  const [customName, setCustomName] = useState<string>(initialIdentity.name);
+  const [selectedAvatar, setSelectedAvatar] = useState<number>(initialIdentity.avatar);
+  const [isEditingName, setIsEditingName] = useState<boolean>(false);
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('kawerify_voice_enabled') !== 'false';
+  });
+  const [mobileTab, setMobileTab] = useState<'share' | 'room' | 'transfers' | 'me'>('share');
+  const [isMobileScreen, setIsMobileScreen] = useState<boolean>(() => {
+    return typeof window !== 'undefined' && window.innerWidth < 960;
+  });
   const [roomCode, setRoomCode] = useState<string>(() => {
     const params = new URLSearchParams(window.location.search);
-    return (params.get('room') || 'GLOBAL').toUpperCase();
+    const saved = localStorage.getItem('kawerify_room_code');
+    return (params.get('room') || saved || 'GLOBAL').toUpperCase();
   });
   const [roomInput, setRoomInput] = useState<string>(() => {
     const params = new URLSearchParams(window.location.search);
-    return (params.get('room') || 'GLOBAL').toUpperCase();
+    const saved = localStorage.getItem('kawerify_room_code');
+    return (params.get('room') || saved || 'GLOBAL').toUpperCase();
   });
 
   const [wsConnected, setWsConnected] = useState<boolean>(false);
@@ -235,6 +278,18 @@ export default function App() {
   useEffect(() => {
     roomRef.current = roomCode;
   }, [roomCode]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobileScreen(window.innerWidth < 960);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('kawerify_voice_enabled', voiceEnabled.toString());
+  }, [voiceEnabled]);
 
   // Screen Wake Lock & Background Audio Keep-Alive so mobile phones don't sleep or freeze when switching tabs
   const startBackgroundServices = useCallback(async () => {
@@ -330,18 +385,18 @@ export default function App() {
 
   const announcePeerJoined = useCallback((peerName: string) => {
     showToast(`👋 ${peerName} joined the room`);
-    if ('speechSynthesis' in window) {
+    if (voiceEnabled && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(`${peerName} joined`);
-        utterance.rate = 1.0;
+        utterance.rate = 1.05;
         utterance.pitch = 1.0;
         window.speechSynthesis.speak(utterance);
       } catch {
         // ignore
       }
     }
-  }, [showToast]);
+  }, [voiceEnabled, showToast]);
 
   const updateTransferStatus = useCallback((
     id: string,
@@ -1311,6 +1366,7 @@ export default function App() {
           socket.send(JSON.stringify({
             type: 'rename',
             name: meRef.current.name,
+            avatar: meRef.current.avatar,
             deviceType: meRef.current.deviceType
           }));
         };
@@ -1421,29 +1477,54 @@ export default function App() {
     setTimeout(() => setCopiedUrl(''), 2000);
   };
 
-  const handleRename = () => {
-    const trimmed = customName.trim().substring(0, 24);
-    if (!trimmed || trimmed === me.name) return;
-    setMe(prev => ({ ...prev, name: trimmed }));
+  const handleRename = (newName?: string, newAvatar?: number) => {
+    const raw = (newName !== undefined ? newName : customName).trim().substring(0, 24);
+    if (!raw) return;
+    const avatarVal = newAvatar !== undefined ? newAvatar : selectedAvatar;
+    
+    localStorage.setItem('kawerify_custom_name', raw);
+    localStorage.setItem('kawerify_custom_avatar', avatarVal.toString());
+    
+    const updated: Peer = { ...me, name: raw, avatar: avatarVal };
+    setMe(updated);
+    setCustomName(raw);
+    setSelectedAvatar(avatarVal);
+    meRef.current = updated;
+    setIsEditingName(false);
+
     if (ws.current && ws.current.readyState === WebSocket.OPEN) {
       ws.current.send(JSON.stringify({
         type: 'rename',
-        name: trimmed,
+        name: raw,
+        avatar: avatarVal,
         deviceType: me.deviceType
       }));
     }
-    sendP2PSignal('broadcast', { type: 'presence', senderName: trimmed });
-    showToast('Device name saved');
+    sendP2PSignal('broadcast', { type: 'presence', senderName: raw, avatar: avatarVal });
+    showToast(`✅ Name saved as "${raw}"`);
   };
 
-  const handleJoinRoom = () => {
-    const clean = (roomInput.trim() || 'GLOBAL').toUpperCase().substring(0, 16);
+  const handleJoinRoom = (codeToJoin?: string) => {
+    const target = codeToJoin !== undefined ? codeToJoin : roomInput;
+    const clean = (target.trim() || 'GLOBAL').toUpperCase().substring(0, 16);
     setRoomInput(clean);
     setRoomCode(clean);
     roomRef.current = clean;
-    sendP2PSignal('broadcast', { type: 'presence', roomCode: clean });
-    sendP2PSignal('broadcast', { type: 'presence-request' });
-    showToast(`Joined pairing room: ${clean}`);
+    localStorage.setItem('kawerify_room_code', clean);
+    
+    sendP2PSignal('broadcast', { type: 'presence', roomCode: clean, senderName: me.name, avatar: me.avatar });
+    sendP2PSignal('broadcast', { type: 'presence-request', roomCode: clean });
+    
+    showToast(`✅ Joined room: ${clean}`);
+    if (voiceEnabled && 'speechSynthesis' in window) {
+      try {
+        const u = new SpeechSynthesisUtterance(`Joined room ${clean}`);
+        u.rate = 1.05;
+        window.speechSynthesis.speak(u);
+      } catch {
+        // ignore
+      }
+    }
   };
 
   const togglePeerSelection = (peerId: string) => {
@@ -1787,16 +1868,849 @@ export default function App() {
     return 'FILE';
   };
 
-  const renderDeviceIcon = (deviceType?: string, size = 18) => {
-    if (deviceType && /mobile|phone|android|iphone/i.test(deviceType)) {
-      return <Smartphone size={size} />;
-    }
-    return <Laptop size={size} />;
+  const renderAvatarEmoji = (avatarId?: number, fallbackDeviceType?: string) => {
+    const found = AVATAR_LIST.find(a => a.id === avatarId);
+    if (found) return found.icon;
+    return fallbackDeviceType && /mobile|phone|android|iphone/i.test(fallbackDeviceType) ? '📱' : '💻';
   };
 
   const isSystemOnline = wsConnected || p2pConnected;
   const selectedPeersList = peers.filter(p => selectedPeerIds.includes(p.id));
   const totalSelectedBytes = selectedFiles.reduce((acc, f) => acc + f.size, 0);
+  const activeTransfersCount = transfers.filter(t => t.status === 'uploading' || t.status === 'downloading').length;
+
+  // Reusable Component: Room Code Card with "Joined" Feedback
+  const renderRoomCard = () => (
+    <section className="card">
+      <div className="card-header">
+        <div className="card-title-group">
+          <span className="card-title">Room Code</span>
+        </div>
+        <span className="room-active-pill">
+          <span className="status-dot online" /> Joined & Active: <strong>{roomCode}</strong>
+        </span>
+      </div>
+
+      <div className="card-body">
+        <div className="room-bar" style={{ marginTop: 0 }}>
+          <div className="room-bar-header">
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontWeight: 600 }}>
+              <Hash size={13} /> Laptop-to-Laptop Room Code
+            </span>
+            <span className="mono" style={{ color: 'var(--accent-primary)', fontSize: '0.74rem' }}>
+              Status: {roomInput.trim().toUpperCase() === roomCode ? 'Joined' : 'Different Room'}
+            </span>
+          </div>
+
+          <div className="room-input-group">
+            <input
+              type="text"
+              className="room-input mono"
+              value={roomInput}
+              placeholder="GLOBAL or custom code"
+              onChange={(e) => setRoomInput(e.target.value.toUpperCase())}
+              onKeyDown={(e) => e.key === 'Enter' && handleJoinRoom()}
+            />
+            <button
+              className={`btn btn-sm ${roomInput.trim().toUpperCase() === roomCode ? 'btn-joined' : 'btn-primary'}`}
+              onClick={() => handleJoinRoom()}
+              disabled={roomInput.trim().toUpperCase() === roomCode}
+              title={roomInput.trim().toUpperCase() === roomCode ? `You are already active in room ${roomCode}` : `Join room ${roomInput.trim().toUpperCase()}`}
+            >
+              {roomInput.trim().toUpperCase() === roomCode ? (
+                <>
+                  <Check size={14} /> Joined
+                </>
+              ) : (
+                <>
+                  <ArrowUpRight size={14} /> Join Room
+                </>
+              )}
+            </button>
+          </div>
+
+          <div className="room-presets-row">
+            <span style={{ fontSize: '0.7rem', color: 'var(--text-tertiary)' }}>Quick rooms:</span>
+            {['GLOBAL', 'OFFICE', 'HOME', 'ROOM 1'].map(preset => (
+              <button
+                key={preset}
+                type="button"
+                className={`room-preset-chip ${roomCode === preset ? 'active' : ''}`}
+                onClick={() => {
+                  setRoomInput(preset);
+                  handleJoinRoom(preset);
+                }}
+              >
+                #{preset}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)', marginTop: '0.45rem' }}>
+            Devices with the same Room Code discover each other automatically without scanning.
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+
+  // Reusable Component: People in Room Card with Custom Name & Avatar
+  const renderPeopleCard = () => (
+    <section className="card">
+      <div className="card-header">
+        <div className="card-title-group">
+          <span className="card-title">People in Room</span>
+          <span className="transport-tag mono" style={{ background: 'var(--status-online-soft)', color: 'var(--status-online)' }}>
+            {peers.length + 1} {peers.length === 0 ? 'Person' : 'People'} • {roomCode}
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+          {peers.length > 0 && (
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={toggleSelectAllPeers}
+            >
+              <Users size={13} />
+              {selectedPeerIds.length === peers.length ? 'Deselect All' : `Select All (${peers.length})`}
+            </button>
+          )}
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={() => {
+              sendP2PSignal('broadcast', { type: 'presence' });
+              sendP2PSignal('broadcast', { type: 'presence-request' });
+              showToast('Scanning room members...');
+            }}
+            title="Refresh room members"
+          >
+            <RefreshCw size={13} />
+          </button>
+        </div>
+      </div>
+
+      <div className="card-body">
+        {/* This Device in the Room */}
+        <div className="peer-card selected" style={{ borderLeft: '3px solid var(--accent-primary)', marginBottom: '0.65rem' }}>
+          <div className="peer-card-left" style={{ flex: 1, minWidth: 0 }}>
+            <div className="peer-icon-box" style={{ background: 'var(--accent-primary-soft)', color: 'var(--accent-primary)', fontSize: '1.25rem' }}>
+              {renderAvatarEmoji(me.avatar, me.deviceType)}
+            </div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div className="peer-card-name" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                <span style={{ fontWeight: 700 }}>{me.name}</span>
+                <span className="mono" style={{ fontSize: '0.68rem', padding: '1px 6px', borderRadius: 4, background: 'var(--accent-primary-soft)', color: 'var(--accent-primary)' }}>You</span>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  style={{ padding: '1px 7px', fontSize: '0.68rem', marginLeft: 'auto' }}
+                  onClick={() => setIsEditingName(prev => !prev)}
+                >
+                  <Edit2 size={11} /> {isEditingName ? 'Close' : 'Edit Name'}
+                </button>
+              </div>
+              <div className="peer-card-meta">
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                  <span className="status-dot online" style={{ width: 6, height: 6 }} /> Active in Room {roomCode}
+                </span>
+              </div>
+            </div>
+          </div>
+          <span className="transport-tag mono">Your Device</span>
+        </div>
+
+        {/* Inline Name & Avatar Customizer like SHAREit */}
+        {isEditingName && (
+          <div style={{
+            background: 'var(--bg-subtle)',
+            border: '1px solid var(--border-strong)',
+            borderRadius: 12,
+            padding: '0.85rem',
+            marginBottom: '0.85rem',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.65rem'
+          }}>
+            <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+              Set Your Device Name & Avatar (like SHAREit)
+            </div>
+            <div style={{ display: 'flex', gap: '0.4rem' }}>
+              <input
+                type="text"
+                className="identity-input"
+                value={customName}
+                maxLength={24}
+                placeholder="Enter your name (e.g. Tonde, My Laptop)"
+                onChange={(e) => setCustomName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleRename()}
+                autoFocus
+              />
+              <button className="btn btn-primary btn-sm" onClick={() => handleRename()}>
+                Save
+              </button>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
+                Choose Avatar:
+              </div>
+              <div className="avatar-picker-grid">
+                {AVATAR_LIST.map((av) => (
+                  <button
+                    key={av.id}
+                    type="button"
+                    className={`avatar-option-btn ${selectedAvatar === av.id ? 'selected' : ''}`}
+                    onClick={() => {
+                      setSelectedAvatar(av.id);
+                      handleRename(customName, av.id);
+                    }}
+                    title={av.label}
+                  >
+                    {av.icon}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {peers.length > 0 ? (
+          <>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.65rem' }}>
+              Other people in Room {roomCode}:
+            </div>
+            <div className="peers-grid">
+              {peers.map((peer) => {
+                const isSelected = selectedPeerIds.includes(peer.id);
+                return (
+                  <div
+                    key={peer.id}
+                    className={`peer-card ${isSelected ? 'selected' : ''}`}
+                    onClick={() => togglePeerSelection(peer.id)}
+                  >
+                    <div className="peer-card-left">
+                      <div className="peer-checkbox">
+                        <Check size={12} strokeWidth={3} />
+                      </div>
+                      <div className="peer-icon-box" style={{ fontSize: '1.25rem' }}>
+                        {renderAvatarEmoji(peer.avatar, peer.deviceType)}
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <div className="peer-card-name" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                          <span>{peer.name}</span>
+                          <span className="status-dot online" style={{ width: 6, height: 6 }} />
+                        </div>
+                        <div className="peer-card-meta">
+                          <span>{peer.deviceType || 'Device'}</span>
+                          <span>•</span>
+                          <span>{peer.transport === 'local-ws' ? 'Offline LAN' : 'Direct WebRTC'}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <span className="transport-tag">
+                      {isSelected ? 'Targeted' : 'Select'}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <div className="empty-radar" style={{ marginTop: '0.5rem' }}>
+            <div className="radar-circles">
+              <div className="radar-circle radar-circle-1" />
+              <div className="radar-circle radar-circle-2" />
+              <div className="radar-circle radar-circle-3" />
+              <div className="radar-sweep" />
+              <div className="radar-center-icon">
+                <Radio size={20} />
+              </div>
+            </div>
+            <div className="radar-title">Waiting for someone to join Room {roomCode}...</div>
+            <div className="radar-subtitle">
+              Enter room code <strong>{roomCode}</strong> on other laptops or phones to share instantly.
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+
+  // Reusable Component: Direct Connect & QR Card
+  const renderPairingCard = () => (
+    <section className="card">
+      <div className="card-header">
+        <div className="card-title-group">
+          <span className="card-title">Direct Connect & QR</span>
+        </div>
+      </div>
+      <div className="card-body">
+        <div className="pairing-section">
+          {ips.map((linkUrl) => (
+            <div key={linkUrl} className="url-copy-box">
+              <span className="url-text mono">{linkUrl}</span>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => handleCopyLink(linkUrl)}
+              >
+                {copiedUrl === linkUrl ? (
+                  <>
+                    <Check size={13} /> Copied
+                  </>
+                ) : (
+                  <>
+                    <Copy size={13} /> Copy Link
+                  </>
+                )}
+              </button>
+            </div>
+          ))}
+
+          {qrCodeUrl && (
+            <div className="qr-panel">
+              <div className="qr-frame">
+                <img src={qrCodeUrl} alt="Pair via QR code" />
+              </div>
+              <div className="qr-info">
+                <h4>Scan with Phone or Tablet</h4>
+                <p>
+                  Point camera at QR code or open link on other laptops to join Room <strong>{roomCode}</strong>.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+
+  // Reusable Component: SHAREit Hero Buttons & File Dropzone
+  const renderShareCard = () => (
+    <section className="card">
+      <div className="card-header">
+        <div className="card-title-group">
+          <span className="card-title">Send Files & Folders</span>
+          {selectedFiles.length > 0 && (
+            <span className="transport-tag mono">{selectedFiles.length} files</span>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            className={`btn btn-sm ${autoSend ? 'btn-primary' : 'btn-secondary'}`}
+            style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 999 }}
+            onClick={() => {
+              setAutoSend(prev => !prev);
+              showToast(!autoSend ? '⚡ Auto-Send enabled: files stream immediately upon drop/select' : 'Auto-Send paused');
+            }}
+            title="Automatically send files as soon as they are added"
+          >
+            ⚡ Auto-Send: {autoSend ? 'ON' : 'OFF'}
+          </button>
+          <button
+            type="button"
+            className={`btn btn-sm ${autoAccept ? 'btn-primary' : 'btn-secondary'}`}
+            style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 999 }}
+            onClick={() => {
+              setAutoAccept(prev => !prev);
+              showToast(!autoAccept ? '🛡️ Auto-Accept enabled: incoming files save automatically' : 'Auto-Accept paused');
+            }}
+            title="Automatically accept and save incoming files without prompt"
+          >
+            🛡️ Auto-Accept: {autoAccept ? 'ON' : 'OFF'}
+          </button>
+        </div>
+      </div>
+
+      <div className="card-body">
+        {/* SHAREit Hero Send & Receive Action Buttons */}
+        <div className="shareit-hero-row">
+          <button
+            type="button"
+            className="shareit-btn shareit-btn-send"
+            onClick={triggerFileInput}
+          >
+            <div className="shareit-btn-icon">
+              <ArrowUp size={26} strokeWidth={2.5} />
+            </div>
+            <div className="shareit-btn-title">SEND</div>
+            <div className="shareit-btn-sub">Pick files or folder</div>
+          </button>
+
+          <button
+            type="button"
+            className="shareit-btn shareit-btn-receive"
+            onClick={() => {
+              if (isMobileScreen) {
+                setMobileTab('room');
+              }
+              showToast(`Ready to receive in Room ${roomCode}. Auto-Accept is ${autoAccept ? 'ON' : 'OFF'}`);
+            }}
+          >
+            <div className="shareit-btn-icon">
+              <ArrowDown size={26} strokeWidth={2.5} />
+            </div>
+            <div className="shareit-btn-title">RECEIVE</div>
+            <div className="shareit-btn-sub">{autoAccept ? 'Auto-Accept: ON' : 'Tap to receive'}</div>
+          </button>
+        </div>
+
+        <input
+          type="file"
+          multiple
+          ref={fileInputRef}
+          style={{ display: 'none' }}
+          onChange={handleFileChange}
+        />
+        <input
+          type="file"
+          multiple
+          {...({ webkitdirectory: '', directory: '' } as any)}
+          ref={folderInputRef}
+          style={{ display: 'none' }}
+          onChange={handleFileChange}
+        />
+
+        {selectedFiles.length === 0 ? (
+          <div
+            className={`dropzone ${isDragActive ? 'active' : ''}`}
+            onDragEnter={handleDrag}
+            onDragOver={handleDrag}
+            onDragLeave={handleDrag}
+            onDrop={handleDrop}
+            onClick={triggerFileInput}
+          >
+            <div className="dropzone-icon">
+              <FolderOpen size={20} />
+            </div>
+            <div className="dropzone-title">
+              {autoSend ? 'Drop or tap to select files & auto-send' : 'Select 100+ files, folders, or drag & drop here'}
+            </div>
+            <div className="dropzone-hint">
+              {autoSend
+                ? `⚡ Auto-Send is ON: files stream directly to everyone in Room ${roomCode} without waiting`
+                : 'Fast bit-for-bit uncompressed transfer with background keep-alive'}
+            </div>
+            <div
+              style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap', justifyContent: 'center' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button className="btn btn-secondary btn-sm" onClick={triggerFileInput}>
+                <Plus size={14} /> Select Files
+              </button>
+              <button className="btn btn-secondary btn-sm" onClick={triggerFolderInput}>
+                <FolderPlus size={14} /> Select Entire Folder
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="files-queue-box">
+            <div className="files-queue-header">
+              <div>
+                <div style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {selectedFiles.length} {selectedFiles.length === 1 ? 'file' : 'files'} queued
+                </div>
+                <div className="card-subtitle mono">
+                  Total size: {formatBytes(totalSelectedBytes)}
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                <button className="btn btn-secondary btn-sm" onClick={triggerFileInput}>
+                  <Plus size={13} /> Add Files
+                </button>
+                <button className="btn btn-secondary btn-sm" onClick={triggerFolderInput}>
+                  <FolderPlus size={13} /> Add Folder
+                </button>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setSelectedFiles([])}
+                  style={{ color: 'var(--status-danger)' }}
+                >
+                  Clear All
+                </button>
+              </div>
+            </div>
+
+            <div className="files-queue-list">
+              {selectedFiles.slice(0, 150).map((file, idx) => (
+                <div key={`${file.name}-${idx}`} className="file-queue-row">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', minWidth: 0, flex: 1 }}>
+                    <div className="file-ext-badge mono">
+                      {getFileExtension(file.name)}
+                    </div>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div className="transfer-filename" title={file.name}>
+                        {file.name}
+                      </div>
+                      <div className="card-subtitle mono">
+                        {formatBytes(file.size)}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    className="icon-btn"
+                    style={{ width: 28, height: 28 }}
+                    onClick={() => removeFileAtIndex(idx)}
+                    title="Remove from queue"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+              {selectedFiles.length > 150 && (
+                <div className="file-queue-row" style={{ justifyContent: 'center', color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
+                  + {selectedFiles.length - 150} additional files ready in batch
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="recipients-bar">
+          <div className="recipients-header">
+            <span>
+              Target Recipients ({selectedPeersList.length > 0 ? selectedPeersList.length : peers.length} of {peers.length})
+            </span>
+            {peers.length > 1 && (
+              <button
+                className="btn btn-secondary btn-sm"
+                style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem' }}
+                onClick={toggleSelectAllPeers}
+              >
+                {selectedPeerIds.length === peers.length ? 'Clear' : `Select All (${peers.length})`}
+              </button>
+            )}
+          </div>
+
+          {selectedPeersList.length > 0 ? (
+            <div className="recipient-chips">
+              {selectedPeersList.map(peer => (
+                <span key={peer.id} className="recipient-chip">
+                  <span>{renderAvatarEmoji(peer.avatar, peer.deviceType)}</span>
+                  <span>{peer.name}</span>
+                  <button
+                    onClick={() => togglePeerSelection(peer.id)}
+                    title={`Remove ${peer.name}`}
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)' }}>
+              {peers.length === 0
+                ? `No other devices in Room ${roomCode} yet. Open this page on another device!`
+                : `All ${peers.length} nearby device(s) will receive the files.`}
+            </div>
+          )}
+        </div>
+
+        <div className="send-bar">
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+            {selectedFiles.length > 0
+              ? `Ready to stream ${selectedFiles.length} file(s)`
+              : 'Select files to start sharing'}
+          </div>
+
+          <div className="send-actions">
+            <button
+              className="btn btn-primary"
+              onClick={handleSendFiles}
+              disabled={selectedFiles.length === 0 || peers.length === 0}
+            >
+              <Send size={15} />
+              {selectedFiles.length > 1
+                ? `Send ${selectedFiles.length} Files`
+                : 'Send File'}
+              {selectedPeersList.length > 0
+                ? ` to ${selectedPeersList.length} Device(s)`
+                : peers.length > 0
+                  ? ` to All (${peers.length})`
+                  : ''}
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+
+  // Reusable Component: Transfers Card
+  const renderTransfersCard = () => (
+    <section className="card">
+      <div className="card-header">
+        <div className="card-title-group">
+          <span className="card-title">Transfers</span>
+          {transfers.length > 0 && (
+            <span className="transport-tag mono">{transfers.length}</span>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <label
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.35rem',
+              fontSize: '0.75rem',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              userSelect: 'none'
+            }}
+            title="Automatically accept incoming multi-file batches without prompts"
+          >
+            <input
+              type="checkbox"
+              checked={autoAccept}
+              onChange={(e) => setAutoAccept(e.target.checked)}
+              style={{ accentColor: 'var(--accent-primary)' }}
+            />
+            Auto-accept
+          </label>
+
+          {transfers.some(t => t.status === 'completed' || t.status === 'failed') && (
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => setTransfers(prev => prev.filter(t => t.status !== 'completed' && t.status !== 'failed'))}
+            >
+              Clear finished
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="card-body">
+        {transfers.length > 0 ? (
+          <div className="transfer-list" style={{ maxHeight: '420px', overflowY: 'auto' }}>
+            {transfers.map((transfer) => (
+              <div
+                key={transfer.id}
+                className={`transfer-row ${
+                  transfer.status === 'completed' ? 'completed' :
+                  transfer.status === 'failed' ? 'failed' : ''
+                }`}
+              >
+                <div className="transfer-row-top">
+                  <div className="transfer-title-wrap">
+                    <span className={`role-pill ${transfer.role}`}>
+                      {transfer.role === 'sender' ? 'Out' : 'In'}
+                    </span>
+                    <span className="transfer-filename" title={transfer.name}>
+                      {transfer.name}
+                    </span>
+                  </div>
+
+                  {['uploading', 'downloading', 'waiting'].includes(transfer.status) ? (
+                    <button
+                      className="icon-btn"
+                      style={{ width: 28, height: 28 }}
+                      onClick={() => cancelTransfer(transfer)}
+                      title="Cancel transfer"
+                    >
+                      <X size={14} />
+                    </button>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      {transfer.status === 'completed' && transfer.blobUrl && (
+                        <a
+                          href={transfer.blobUrl}
+                          download={transfer.name}
+                          className="icon-btn"
+                          style={{ width: 26, height: 26, color: 'var(--status-online)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+                          title="Download / Save again"
+                        >
+                          <Download size={13} />
+                        </a>
+                      )}
+                      <span className="mono" style={{
+                        fontSize: '0.73rem',
+                        fontWeight: 600,
+                        color: transfer.status === 'completed' ? 'var(--status-online)' : 'var(--status-danger)'
+                      }}>
+                        {transfer.status === 'completed' ? 'Completed' : 'Canceled'}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="progress-track">
+                  <div
+                    className="progress-fill"
+                    style={{ width: `${transfer.progress}%` }}
+                  />
+                </div>
+
+                <div className="transfer-meta-row mono">
+                  <span>{formatBytes(transfer.size)} • {transfer.peerName}</span>
+                  <span>
+                    {transfer.speed !== 'Done' && transfer.speed !== '--' && transfer.speed !== 'Direct WebRTC'
+                      ? `${transfer.speed} MB/s • `
+                      : ''}
+                    {transfer.eta}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '0.84rem' }}>
+            Active and completed file transfers will appear here.
+          </div>
+        )}
+      </div>
+    </section>
+  );
+
+  // Reusable Component: Profile & Settings "Me" Card like SHAREit
+  const renderProfileCard = () => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.15rem' }}>
+      <section className="card">
+        <div className="card-header">
+          <div className="card-title-group">
+            <span className="card-title">My Profile (SHAREit Style)</span>
+          </div>
+          <span className="mono" style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>{me.id}</span>
+        </div>
+
+        <div className="card-body">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.25rem' }}>
+            <div style={{
+              width: 64,
+              height: 64,
+              borderRadius: '50%',
+              background: 'var(--accent-primary-soft)',
+              border: '2px solid var(--accent-primary)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: '2rem',
+              boxShadow: '0 4px 12px rgba(59, 130, 246, 0.25)'
+            }}>
+              {renderAvatarEmoji(selectedAvatar, me.deviceType)}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)', textTransform: 'uppercase', fontWeight: 600 }}>
+                Device Display Name
+              </div>
+              <div style={{ display: 'flex', gap: '0.4rem', marginTop: '0.25rem' }}>
+                <input
+                  type="text"
+                  className="identity-input"
+                  value={customName}
+                  maxLength={24}
+                  placeholder="Set your name"
+                  onChange={(e) => setCustomName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleRename()}
+                />
+                <button className="btn btn-primary btn-sm" onClick={() => handleRename()}>
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ marginTop: '0.5rem' }}>
+            <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.4rem' }}>
+              Select Avatar:
+            </div>
+            <div className="avatar-picker-grid">
+              {AVATAR_LIST.map((av) => (
+                <button
+                  key={av.id}
+                  type="button"
+                  className={`avatar-option-btn ${selectedAvatar === av.id ? 'selected' : ''}`}
+                  onClick={() => {
+                    setSelectedAvatar(av.id);
+                    handleRename(customName, av.id);
+                  }}
+                  title={av.label}
+                >
+                  {av.icon}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="card-header">
+          <div className="card-title-group">
+            <span className="card-title">Transfer Preferences</span>
+          </div>
+        </div>
+        <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontSize: '0.88rem', fontWeight: 600 }}>⚡ Auto-Send</div>
+              <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>Immediately send files when picked without clicking Send</div>
+            </div>
+            <button
+              type="button"
+              className={`btn btn-sm ${autoSend ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => {
+                const next = !autoSend;
+                setAutoSend(next);
+                showToast(next ? '⚡ Auto-Send enabled' : 'Auto-Send disabled');
+              }}
+            >
+              {autoSend ? 'ON' : 'OFF'}
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontSize: '0.88rem', fontWeight: 600 }}>🛡️ Auto-Accept</div>
+              <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>Automatically accept and save incoming files</div>
+            </div>
+            <button
+              type="button"
+              className={`btn btn-sm ${autoAccept ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => {
+                const next = !autoAccept;
+                setAutoAccept(next);
+                showToast(next ? '🛡️ Auto-Accept enabled' : 'Auto-Accept disabled');
+              }}
+            >
+              {autoAccept ? 'ON' : 'OFF'}
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontSize: '0.88rem', fontWeight: 600 }}>🔊 Voice Announcements</div>
+              <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>Utters "[Name] joined" when peers connect</div>
+            </div>
+            <button
+              type="button"
+              className={`btn btn-sm ${voiceEnabled ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => {
+                const next = !voiceEnabled;
+                setVoiceEnabled(next);
+                showToast(next ? '🔊 Voice announcements ON' : '🔇 Voice announcements OFF');
+              }}
+            >
+              {voiceEnabled ? 'ON' : 'OFF'}
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontSize: '0.88rem', fontWeight: 600 }}>🌓 Appearance</div>
+              <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>Toggle dark / light display theme</div>
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')}
+            >
+              {theme === 'dark' ? 'Dark Mode' : 'Light Mode'}
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
 
   return (
     <div className="shell">
@@ -1808,21 +2722,39 @@ export default function App() {
             <div className="brand-mark">K</div>
             <div className="brand-text">
               <span className="brand-name">Kawerify Transfer</span>
-              <span className="brand-byline">Direct WebRTC & Local Wi-Fi File Sharing</span>
+              <span className="brand-byline">Fast Direct P2P & Wi-Fi Sharing</span>
             </div>
           </a>
 
           <div className="topbar-actions">
+            <div className="room-active-pill" title={`Joined room: ${roomCode}`}>
+              <span className="status-dot online" />
+              <span>{roomCode}</span>
+            </div>
+
             <div className="status-pill">
               <span className={`status-dot ${isSystemOnline ? 'online' : ''}`} />
               <span>
                 {wsConnected
-                  ? 'Offline LAN Ready'
+                  ? 'Offline LAN'
                   : p2pConnected
-                    ? 'Direct WebRTC Ready'
-                    : 'Connecting...'}
+                    ? 'Direct WebRTC'
+                    : 'Connecting'}
               </span>
             </div>
+
+            <button
+              className="icon-btn"
+              onClick={() => {
+                const next = !voiceEnabled;
+                setVoiceEnabled(next);
+                showToast(next ? '🔊 Voice announcements ON' : '🔇 Voice announcements muted');
+              }}
+              title={voiceEnabled ? 'Mute voice announcements' : 'Enable voice announcements'}
+              aria-label="Toggle voice announcements"
+            >
+              {voiceEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
+            </button>
 
             <button
               className="icon-btn"
@@ -1837,557 +2769,106 @@ export default function App() {
       </header>
 
       <main className="workspace">
-        <div className="column">
-          <section className="card">
-            <div className="card-header">
-              <div className="card-title-group">
-                <span className="card-title">This Device</span>
-              </div>
-              <span className="card-subtitle mono">{me.id}</span>
+        {isMobileScreen ? (
+          /* Mobile View: Render active tab */
+          <div className="column">
+            {mobileTab === 'share' && (
+              <>
+                {renderShareCard()}
+                {activeTransfersCount > 0 && renderTransfersCard()}
+              </>
+            )}
+
+            {mobileTab === 'room' && (
+              <>
+                {renderRoomCard()}
+                {renderPeopleCard()}
+                {renderPairingCard()}
+              </>
+            )}
+
+            {mobileTab === 'transfers' && (
+              <>
+                {renderTransfersCard()}
+              </>
+            )}
+
+            {mobileTab === 'me' && (
+              <>
+                {renderProfileCard()}
+              </>
+            )}
+          </div>
+        ) : (
+          /* Desktop View: Side-by-side Dashboard */
+          <>
+            <div className="column">
+              {renderRoomCard()}
+              {renderPeopleCard()}
+              {renderPairingCard()}
             </div>
 
-            <div className="card-body">
-              <div className="identity-box">
-                <div className="identity-left">
-                  <div className="device-badge-icon">
-                    {renderDeviceIcon(me.deviceType, 20)}
-                  </div>
-                  <div className="identity-meta">
-                    <div className="identity-label">Device Name</div>
-                    <div className="identity-input-row">
-                      <input
-                        type="text"
-                        className="identity-input"
-                        value={customName}
-                        onChange={(e) => setCustomName(e.target.value)}
-                        onBlur={handleRename}
-                        onKeyDown={(e) => e.key === 'Enter' && handleRename()}
-                        aria-label="Device name"
-                      />
-                    </div>
-                  </div>
-                </div>
-                {customName.trim() !== me.name && (
-                  <button className="btn btn-secondary btn-sm" onClick={handleRename}>
-                    Save
-                  </button>
-                )}
-              </div>
-
-              <div className="room-bar">
-                <div className="room-bar-header">
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
-                    <Hash size={13} /> Laptop-to-Laptop Room Code
-                  </span>
-                  <span className="mono" style={{ color: 'var(--accent-primary)' }}>
-                    Active: {roomCode}
-                  </span>
-                </div>
-                <div className="room-input-group">
-                  <input
-                    type="text"
-                    className="room-input mono"
-                    value={roomInput}
-                    placeholder="GLOBAL or custom code"
-                    onChange={(e) => setRoomInput(e.target.value.toUpperCase())}
-                    onKeyDown={(e) => e.key === 'Enter' && handleJoinRoom()}
-                  />
-                  <button className="btn btn-secondary btn-sm" onClick={handleJoinRoom}>
-                    Join Room
-                  </button>
-                </div>
-                <div style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)' }}>
-                  Devices with the same Room Code discover each other automatically without scanning.
-                </div>
-              </div>
-
-              <div className="pairing-section">
-                {ips.map((linkUrl) => (
-                  <div key={linkUrl} className="url-copy-box">
-                    <span className="url-text mono">{linkUrl}</span>
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => handleCopyLink(linkUrl)}
-                    >
-                      {copiedUrl === linkUrl ? (
-                        <>
-                          <Check size={13} /> Copied
-                        </>
-                      ) : (
-                        <>
-                          <Copy size={13} /> Copy Link
-                        </>
-                      )}
-                    </button>
-                  </div>
-                ))}
-
-                {qrCodeUrl && (
-                  <div className="qr-panel">
-                    <div className="qr-frame">
-                      <img src={qrCodeUrl} alt="Pair via QR code" />
-                    </div>
-                    <div className="qr-info">
-                      <h4>Phone or Tablet QR</h4>
-                      <p>
-                        Scan with a phone camera, or open the link on another laptop to connect without scanning.
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </div>
+            <div className="column">
+              {renderShareCard()}
+              {renderTransfersCard()}
             </div>
-          </section>
-
-          <section className="card">
-            <div className="card-header">
-              <div className="card-title-group">
-                <span className="card-title">People in Room</span>
-                <span className="transport-tag mono" style={{ background: 'var(--status-online-soft)', color: 'var(--status-online)' }}>
-                  {peers.length + 1} {peers.length === 0 ? 'Person' : 'People'} • {roomCode}
-                </span>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                {peers.length > 0 && (
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={toggleSelectAllPeers}
-                  >
-                    <Users size={13} />
-                    {selectedPeerIds.length === peers.length ? 'Deselect All' : `Select All (${peers.length})`}
-                  </button>
-                )}
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => {
-                    sendP2PSignal('broadcast', { type: 'presence' });
-                    sendP2PSignal('broadcast', { type: 'presence-request' });
-                    showToast('Scanning room members...');
-                  }}
-                  title="Refresh room members"
-                >
-                  <RefreshCw size={13} />
-                </button>
-              </div>
-            </div>
-
-            <div className="card-body">
-              {/* This Device in the Room */}
-              <div className="peer-card selected" style={{ borderLeft: '3px solid var(--accent-primary)', marginBottom: '0.65rem' }}>
-                <div className="peer-card-left">
-                  <div className="peer-icon-box" style={{ background: 'var(--accent-primary-soft)', color: 'var(--accent-primary)' }}>
-                    {renderDeviceIcon(me.deviceType, 18)}
-                  </div>
-                  <div style={{ minWidth: 0 }}>
-                    <div className="peer-card-name" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                      <span>{me.name}</span>
-                      <span className="mono" style={{ fontSize: '0.68rem', padding: '1px 6px', borderRadius: 4, background: 'var(--accent-primary-soft)', color: 'var(--accent-primary)' }}>You</span>
-                    </div>
-                    <div className="peer-card-meta">
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                        <span className="status-dot online" style={{ width: 6, height: 6 }} /> Active in Room {roomCode}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <span className="transport-tag mono">Your Device</span>
-              </div>
-
-              {peers.length > 0 ? (
-                <>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.65rem' }}>
-                    Other people in Room {roomCode}:
-                  </div>
-                  <div className="peers-grid">
-                    {peers.map((peer) => {
-                      const isSelected = selectedPeerIds.includes(peer.id);
-                      return (
-                        <div
-                          key={peer.id}
-                          className={`peer-card ${isSelected ? 'selected' : ''}`}
-                          onClick={() => togglePeerSelection(peer.id)}
-                        >
-                          <div className="peer-card-left">
-                            <div className="peer-checkbox">
-                              <Check size={12} strokeWidth={3} />
-                            </div>
-                            <div className="peer-icon-box">
-                              {renderDeviceIcon(peer.deviceType, 18)}
-                            </div>
-                            <div style={{ minWidth: 0 }}>
-                              <div className="peer-card-name" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                                <span>{peer.name}</span>
-                                <span className="status-dot online" style={{ width: 6, height: 6 }} />
-                              </div>
-                              <div className="peer-card-meta">
-                                <span>{peer.deviceType || 'Laptop / Desktop'}</span>
-                                <span>•</span>
-                                <span>{peer.transport === 'local-ws' ? 'Offline LAN' : 'Direct WebRTC'}</span>
-                              </div>
-                            </div>
-                          </div>
-                          <span className="transport-tag">
-                            {isSelected ? 'Targeted' : 'Select'}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
-              ) : (
-                <div className="empty-radar" style={{ marginTop: '0.5rem' }}>
-                  <div className="radar-circles">
-                    <Radio size={20} />
-                  </div>
-                  <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                    Waiting for others to join Room {roomCode}
-                  </div>
-                  <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', maxWidth: '280px' }}>
-                    Share your Room Code <strong>{roomCode}</strong> or copy the link above. As soon as someone opens it, Kawerify announces them and begins streaming!
-                  </p>
-                </div>
-              )}
-            </div>
-          </section>
-        </div>
-
-        <div className="column">
-          <section className="card">
-            <div className="card-header">
-              <div className="card-title-group">
-                <span className="card-title">Send Files & Folders</span>
-                {selectedFiles.length > 0 && (
-                  <span className="transport-tag mono">{selectedFiles.length} files</span>
-                )}
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
-                <button
-                  type="button"
-                  className={`btn btn-sm ${autoSend ? 'btn-primary' : 'btn-secondary'}`}
-                  style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 999 }}
-                  onClick={() => {
-                    setAutoSend(prev => !prev);
-                    showToast(!autoSend ? '⚡ Auto-Send enabled: files stream immediately upon drop/select' : 'Auto-Send paused');
-                  }}
-                  title="Automatically send files as soon as they are added"
-                >
-                  ⚡ Auto-Send: {autoSend ? 'ON' : 'OFF'}
-                </button>
-                <button
-                  type="button"
-                  className={`btn btn-sm ${autoAccept ? 'btn-primary' : 'btn-secondary'}`}
-                  style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 999 }}
-                  onClick={() => {
-                    setAutoAccept(prev => !prev);
-                    showToast(!autoAccept ? '🛡️ Auto-Accept enabled: incoming files save automatically' : 'Auto-Accept paused');
-                  }}
-                  title="Automatically accept and save incoming files without prompt"
-                >
-                  🛡️ Auto-Accept: {autoAccept ? 'ON' : 'OFF'}
-                </button>
-              </div>
-            </div>
-
-            <div className="card-body">
-              <input
-                type="file"
-                multiple
-                ref={fileInputRef}
-                style={{ display: 'none' }}
-                onChange={handleFileChange}
-              />
-              <input
-                type="file"
-                multiple
-                {...({ webkitdirectory: '', directory: '' } as any)}
-                ref={folderInputRef}
-                style={{ display: 'none' }}
-                onChange={handleFileChange}
-              />
-
-              {selectedFiles.length === 0 ? (
-                <div
-                  className={`dropzone ${isDragActive ? 'active' : ''}`}
-                  onDragEnter={handleDrag}
-                  onDragOver={handleDrag}
-                  onDragLeave={handleDrag}
-                  onDrop={handleDrop}
-                  onClick={triggerFileInput}
-                >
-                  <div className="dropzone-icon">
-                    <FolderOpen size={20} />
-                  </div>
-                  <div className="dropzone-title">
-                    {autoSend ? 'Drop or select files to send immediately' : 'Select 100+ files, folders, or drag & drop here'}
-                  </div>
-                  <div className="dropzone-hint">
-                    {autoSend
-                      ? `⚡ Auto-Send is ON: files stream directly to everyone in Room ${roomCode} without needing to accept`
-                      : 'Bit-for-bit uncompressed transfer with background keep-alive'}
-                  </div>
-                  <div
-                    style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap', justifyContent: 'center' }}
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <button className="btn btn-secondary btn-sm" onClick={triggerFileInput}>
-                      <Plus size={14} /> Select Files
-                    </button>
-                    <button className="btn btn-secondary btn-sm" onClick={triggerFolderInput}>
-                      <FolderPlus size={14} /> Select Entire Folder
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="files-queue-box">
-                  <div className="files-queue-header">
-                    <div>
-                      <div style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                        {selectedFiles.length} {selectedFiles.length === 1 ? 'file' : 'files'} queued
-                      </div>
-                      <div className="card-subtitle mono">
-                        Total size: {formatBytes(totalSelectedBytes)}
-                      </div>
-                    </div>
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
-                      <button className="btn btn-secondary btn-sm" onClick={triggerFileInput}>
-                        <Plus size={13} /> Add Files
-                      </button>
-                      <button className="btn btn-secondary btn-sm" onClick={triggerFolderInput}>
-                        <FolderPlus size={13} /> Add Folder
-                      </button>
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={() => setSelectedFiles([])}
-                        style={{ color: 'var(--status-danger)' }}
-                      >
-                        Clear All
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="files-queue-list">
-                    {selectedFiles.slice(0, 150).map((file, idx) => (
-                      <div key={`${file.name}-${idx}`} className="file-queue-row">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', minWidth: 0, flex: 1 }}>
-                          <div className="file-ext-badge mono">
-                            {getFileExtension(file.name)}
-                          </div>
-                          <div style={{ minWidth: 0, flex: 1 }}>
-                            <div className="transfer-filename" title={file.name}>
-                              {file.name}
-                            </div>
-                            <div className="card-subtitle mono">
-                              {formatBytes(file.size)}
-                            </div>
-                          </div>
-                        </div>
-                        <button
-                          className="icon-btn"
-                          style={{ width: 28, height: 28 }}
-                          onClick={() => removeFileAtIndex(idx)}
-                          title="Remove from queue"
-                        >
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ))}
-                    {selectedFiles.length > 150 && (
-                      <div className="file-queue-row" style={{ justifyContent: 'center', color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
-                        + {selectedFiles.length - 150} additional files ready in batch
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              <div className="recipients-bar">
-                <div className="recipients-header">
-                  <span>
-                    Target Recipients ({selectedPeersList.length} selected)
-                  </span>
-                  {peers.length > 1 && (
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem' }}
-                      onClick={toggleSelectAllPeers}
-                    >
-                      {selectedPeerIds.length === peers.length ? 'Clear' : `Select All (${peers.length})`}
-                    </button>
-                  )}
-                </div>
-
-                {selectedPeersList.length > 0 ? (
-                  <div className="recipient-chips">
-                    {selectedPeersList.map(peer => (
-                      <span key={peer.id} className="recipient-chip">
-                        {renderDeviceIcon(peer.deviceType, 12)}
-                        <span>{peer.name}</span>
-                        <button
-                          onClick={() => togglePeerSelection(peer.id)}
-                          title={`Remove ${peer.name}`}
-                        >
-                          <X size={12} />
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <div style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)' }}>
-                    Click one or more devices under Nearby Devices to select recipients.
-                  </div>
-                )}
-              </div>
-
-              <div className="send-bar">
-                <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-                  {selectedFiles.length > 0 && selectedPeersList.length > 0
-                    ? `Ready to stream ${selectedFiles.length} file(s) sequentially`
-                    : 'Select files and recipient devices to start'}
-                </div>
-
-                <div className="send-actions">
-                  <button
-                    className="btn btn-primary"
-                    onClick={handleSendFiles}
-                    disabled={selectedFiles.length === 0 || selectedPeersList.length === 0}
-                  >
-                    <Send size={15} />
-                    {selectedFiles.length > 1
-                      ? `Send ${selectedFiles.length} Files`
-                      : 'Send File'}
-                    {selectedPeersList.length > 1 ? ` to ${selectedPeersList.length} Devices` : ''}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className="card">
-            <div className="card-header">
-              <div className="card-title-group">
-                <span className="card-title">Transfers</span>
-                {transfers.length > 0 && (
-                  <span className="transport-tag mono">{transfers.length}</span>
-                )}
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                <label
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '0.35rem',
-                    fontSize: '0.75rem',
-                    color: 'var(--text-secondary)',
-                    cursor: 'pointer',
-                    userSelect: 'none'
-                  }}
-                  title="Automatically accept incoming multi-file batches without prompts"
-                >
-                  <input
-                    type="checkbox"
-                    checked={autoAccept}
-                    onChange={(e) => setAutoAccept(e.target.checked)}
-                    style={{ accentColor: 'var(--accent-primary)' }}
-                  />
-                  Auto-accept incoming
-                </label>
-
-                {transfers.some(t => t.status === 'completed' || t.status === 'failed') && (
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => setTransfers(prev => prev.filter(t => t.status !== 'completed' && t.status !== 'failed'))}
-                  >
-                    Clear finished
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="card-body">
-              {transfers.length > 0 ? (
-                <div className="transfer-list" style={{ maxHeight: '420px', overflowY: 'auto' }}>
-                  {transfers.map((transfer) => (
-                    <div
-                      key={transfer.id}
-                      className={`transfer-row ${
-                        transfer.status === 'completed' ? 'completed' :
-                        transfer.status === 'failed' ? 'failed' : ''
-                      }`}
-                    >
-                      <div className="transfer-row-top">
-                        <div className="transfer-title-wrap">
-                          <span className={`role-pill ${transfer.role}`}>
-                            {transfer.role === 'sender' ? 'Out' : 'In'}
-                          </span>
-                          <span className="transfer-filename" title={transfer.name}>
-                            {transfer.name}
-                          </span>
-                        </div>
-
-                        {['uploading', 'downloading', 'waiting'].includes(transfer.status) ? (
-                          <button
-                            className="icon-btn"
-                            style={{ width: 28, height: 28 }}
-                            onClick={() => cancelTransfer(transfer)}
-                            title="Cancel transfer"
-                          >
-                            <X size={14} />
-                          </button>
-                        ) : (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                            {transfer.status === 'completed' && transfer.blobUrl && (
-                              <a
-                                href={transfer.blobUrl}
-                                download={transfer.name}
-                                className="icon-btn"
-                                style={{ width: 26, height: 26, color: 'var(--status-online)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-                                title="Download / Save again"
-                              >
-                                <Download size={13} />
-                              </a>
-                            )}
-                            <span className="mono" style={{
-                              fontSize: '0.73rem',
-                              fontWeight: 600,
-                              color: transfer.status === 'completed' ? 'var(--status-online)' : 'var(--status-danger)'
-                            }}>
-                              {transfer.status === 'completed' ? 'Completed' : 'Canceled'}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="progress-track">
-                        <div
-                          className="progress-fill"
-                          style={{ width: `${transfer.progress}%` }}
-                        />
-                      </div>
-
-                      <div className="transfer-meta-row mono">
-                        <span>{formatBytes(transfer.size)} • {transfer.peerName}</span>
-                        <span>
-                          {transfer.speed !== 'Done' && transfer.speed !== '--' && transfer.speed !== 'Direct WebRTC'
-                            ? `${transfer.speed} MB/s • `
-                            : ''}
-                          {transfer.eta}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '0.84rem' }}>
-                  Active and completed file transfers will appear here.
-                </div>
-              )}
-            </div>
-          </section>
-        </div>
+          </>
+        )}
       </main>
+
+      {/* Mobile Bottom Navigation Bar like SHAREit */}
+      <nav className="mobile-bottom-nav">
+        <button
+          type="button"
+          className={`bottom-nav-item ${mobileTab === 'share' ? 'active' : ''}`}
+          onClick={() => setMobileTab('share')}
+        >
+          <div className="bottom-nav-icon-wrap">
+            <Send size={20} />
+            {selectedFiles.length > 0 && (
+              <span className="bottom-nav-badge">{selectedFiles.length}</span>
+            )}
+          </div>
+          <span>Share</span>
+        </button>
+
+        <button
+          type="button"
+          className={`bottom-nav-item ${mobileTab === 'room' ? 'active' : ''}`}
+          onClick={() => setMobileTab('room')}
+        >
+          <div className="bottom-nav-icon-wrap">
+            <Users size={20} />
+            <span className="bottom-nav-badge">{peers.length + 1}</span>
+          </div>
+          <span>Room</span>
+        </button>
+
+        <button
+          type="button"
+          className={`bottom-nav-item ${mobileTab === 'transfers' ? 'active' : ''}`}
+          onClick={() => setMobileTab('transfers')}
+        >
+          <div className="bottom-nav-icon-wrap">
+            <HardDrive size={20} />
+            {activeTransfersCount > 0 && (
+              <span className="bottom-nav-badge pulse">{activeTransfersCount}</span>
+            )}
+          </div>
+          <span>Transfers</span>
+        </button>
+
+        <button
+          type="button"
+          className={`bottom-nav-item ${mobileTab === 'me' ? 'active' : ''}`}
+          onClick={() => setMobileTab('me')}
+        >
+          <div className="bottom-nav-icon-wrap">
+            <User size={20} />
+          </div>
+          <span>Me</span>
+        </button>
+      </nav>
 
       {incomingTransfer && (
         <div className="modal-backdrop">
