@@ -1202,3 +1202,138 @@ pre,
 .footer a:hover {
   text-decoration: underline;
 }
+
+/* ========================================================
+   Responsive Big Screen Layout: Full Width & Panoramic
+   ======================================================== */
+
+@media (min-width: 1200px) {
+  .topbar-inner {
+    max-width: 100% !important;
+    padding: 0.9rem 2.5rem !important;
+  }
+
+  .workspace {
+    max-width: 100% !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 1.5rem 2.5rem 3.5rem !important;
+    display: grid !important;
+    grid-template-columns: 360px minmax(360px, 1fr) minmax(440px, 1.25fr) !important;
+    gap: 1.75rem !important;
+    align-items: start !important;
+  }
+
+  .column-left {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .column-center {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .column-right {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .dropzone {
+    min-height: 250px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 2.5rem 1.5rem !important;
+  }
+
+  .dropzone-icon {
+    width: 64px !important;
+    height: 64px !important;
+  }
+
+  .peer-grid {
+    display: grid !important;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)) !important;
+    gap: 0.75rem !important;
+  }
+}
+
+@media (min-width: 1680px) {
+  .topbar-inner {
+    padding: 1.1rem 3.5rem !important;
+  }
+
+  .workspace {
+    padding: 2rem 3.5rem 4rem !important;
+    grid-template-columns: 400px minmax(440px, 1fr) minmax(540px, 1.35fr) !important;
+    gap: 2.25rem !important;
+  }
+}
+
+/* ========================================================
+   Big Screen Onboarding Modal: Expansive Split-Hero Studio
+   ======================================================== */
+
+@media (min-width: 860px) {
+  .onboarding-card {
+    max-width: 960px !important;
+    width: 92vw !important;
+    max-height: 86vh !important;
+    padding: 2.5rem !important;
+    overflow-y: auto !important;
+  }
+
+  .onboarding-split-layout {
+    display: grid !important;
+    grid-template-columns: 1fr 1.2fr !important;
+    gap: 2.5rem !important;
+    align-items: center !important;
+  }
+
+  .onboarding-split-hero {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    text-align: left !important;
+    border-right: 1px solid var(--border-subtle) !important;
+    padding-right: 2.25rem !important;
+    height: 100% !important;
+    justify-content: center !important;
+  }
+
+  .onboarding-split-hero .splash-logo-wrap {
+    width: 72px !important;
+    height: 72px !important;
+    font-size: 2.2rem !important;
+    margin-bottom: 1.25rem !important;
+  }
+
+  .onboarding-split-hero .splash-title {
+    font-size: 1.85rem !important;
+    margin-bottom: 0.5rem !important;
+    text-align: left !important;
+  }
+
+  .onboarding-split-hero .splash-desc {
+    font-size: 0.95rem !important;
+    max-width: 100% !important;
+    text-align: left !important;
+    color: var(--text-secondary) !important;
+  }
+
+  .onboarding-split-content {
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+  }
+
+  .onboarding-actions {
+    margin-top: 1.5rem !important;
+    padding-top: 0 !important;
+  }
+}

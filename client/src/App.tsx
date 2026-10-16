@@ -3179,15 +3179,18 @@ export default function App() {
             )}
           </div>
         ) : (
-          /* Desktop View: Side-by-side Dashboard */
+          /* Desktop & Bigscreen View: 3-Column Screen-Filling Dashboard */
           <>
-            <div className="column">
+            <div className="column column-left">
               {renderRoomCard()}
-              {renderPeopleCard()}
               {renderPairingCard()}
             </div>
 
-            <div className="column">
+            <div className="column column-center">
+              {renderPeopleCard()}
+            </div>
+
+            <div className="column column-right">
               {renderShareCard()}
               {renderTransfersCard()}
             </div>
@@ -3404,236 +3407,257 @@ export default function App() {
             </div>
 
             {onboardingStep === 'splash' && (
-              <>
-                <div className="splash-hero">
+              <div className="onboarding-split-layout">
+                <div className="onboarding-split-hero">
                   <div className="splash-logo-wrap">
-                    <Zap size={36} />
+                    <Zap size={38} />
                   </div>
                   <h1 id="onboarding-title" className="splash-title">Kawerify Transfer</h1>
                   <p className="splash-desc">
-                    Fast, private, direct peer-to-peer file sharing between laptops and phones. No cloud required.
+                    Fast, private, direct peer-to-peer file sharing across all your laptops, phones, and tablets.
                   </p>
-                </div>
-
-                <div className="splash-features">
-                  <div className="splash-feature-item">
-                    <div className="splash-feature-icon" style={{ backgroundColor: 'rgba(59, 130, 246, 0.15)', color: '#3b82f6' }}>
-                      <Zap size={18} />
-                    </div>
-                    <div>
-                      <div className="splash-feature-title">Maximum Local Speed</div>
-                      <div className="splash-feature-text">Streams directly over Wi-Fi or WebRTC mesh at full hardware speed.</div>
-                    </div>
-                  </div>
-
-                  <div className="splash-feature-item">
-                    <div className="splash-feature-icon" style={{ backgroundColor: 'rgba(16, 185, 129, 0.15)', color: '#10b981' }}>
-                      <ShieldCheck size={18} />
-                    </div>
-                    <div>
-                      <div className="splash-feature-title">100% Private & Direct</div>
-                      <div className="splash-feature-text">Zero server storage. Files stream directly from sender to receiver.</div>
-                    </div>
-                  </div>
-
-                  <div className="splash-feature-item">
-                    <div className="splash-feature-icon" style={{ backgroundColor: 'rgba(249, 115, 22, 0.15)', color: '#f97316' }}>
-                      <HardDrive size={18} />
-                    </div>
-                    <div>
-                      <div className="splash-feature-title">Large Files & Batches</div>
-                      <div className="splash-feature-text">Share 100+ files or multi-gigabyte videos without compression or limits.</div>
-                    </div>
+                  <div style={{ marginTop: '1.25rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                    Powered by <strong style={{ color: 'var(--accent-primary)' }}>Kawerify Tech</strong>
                   </div>
                 </div>
 
-                <div className="onboarding-actions" style={{ justifyContent: 'flex-end' }}>
-                  <button
-                    className="btn btn-primary"
-                    style={{ width: '100%', justifyContent: 'center', padding: '0.75rem 1rem', fontSize: '0.95rem' }}
-                    onClick={() => setOnboardingStep('profile')}
-                  >
-                    Get Started <ArrowRight size={16} />
-                  </button>
+                <div className="onboarding-split-content">
+                  <div className="splash-features">
+                    <div className="splash-feature-item">
+                      <div className="splash-feature-icon" style={{ backgroundColor: 'rgba(0, 113, 227, 0.16)', color: 'var(--accent-primary)' }}>
+                        <Zap size={18} />
+                      </div>
+                      <div>
+                        <div className="splash-feature-title">Maximum Local Speed</div>
+                        <div className="splash-feature-text">Streams directly over Wi-Fi or WebRTC mesh at full hardware speed.</div>
+                      </div>
+                    </div>
+
+                    <div className="splash-feature-item">
+                      <div className="splash-feature-icon" style={{ backgroundColor: 'rgba(48, 209, 88, 0.16)', color: 'var(--status-online)' }}>
+                        <ShieldCheck size={18} />
+                      </div>
+                      <div>
+                        <div className="splash-feature-title">100% Private & Direct</div>
+                        <div className="splash-feature-text">Zero server storage. Files stream directly from sender to receiver.</div>
+                      </div>
+                    </div>
+
+                    <div className="splash-feature-item">
+                      <div className="splash-feature-icon" style={{ backgroundColor: 'rgba(255, 159, 10, 0.16)', color: 'var(--status-warning)' }}>
+                        <HardDrive size={18} />
+                      </div>
+                      <div>
+                        <div className="splash-feature-title">Large Files & Batches</div>
+                        <div className="splash-feature-text">Share 100+ files or multi-gigabyte videos without compression or limits.</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="onboarding-actions" style={{ justifyContent: 'flex-end' }}>
+                    <button
+                      className="btn btn-primary"
+                      style={{ width: '100%', justifyContent: 'center', padding: '0.85rem 1.25rem', fontSize: '0.98rem' }}
+                      onClick={() => setOnboardingStep('profile')}
+                    >
+                      Get Started <ArrowRight size={16} />
+                    </button>
+                  </div>
                 </div>
-              </>
+              </div>
             )}
 
             {onboardingStep === 'profile' && (
-              <>
-                <div className="onboarding-step-label">Step 1 of 3 • Profile Setup</div>
-                <h2 id="onboarding-title" style={{ fontSize: '1.25rem', fontWeight: 800, textAlign: 'center', marginBottom: '0.35rem' }}>
-                  Set Device Name & Icon
-                </h2>
-                <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', textAlign: 'center', marginBottom: '1.2rem' }}>
-                  This is how nearby laptops and phones will discover your device.
-                </p>
+              <div className="onboarding-split-layout">
+                <div className="onboarding-split-hero">
+                  <div className="onboarding-step-label">Step 1 of 3 • Profile Setup</div>
+                  <h2 style={{ fontSize: '1.75rem', fontWeight: 800, marginBottom: '0.45rem' }}>
+                    Choose Name & Icon
+                  </h2>
+                  <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
+                    This is how nearby laptops and phones will identify you on your network.
+                  </p>
 
-                <div className="onboarding-live-preview">
-                  {renderAvatarBadge(onboardingAvatar, undefined, 24, 52)}
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>
-                      {onboardingName.trim() || 'My Device'}
-                    </div>
-                    <div style={{ fontSize: '0.74rem', color: 'var(--text-tertiary)' }}>
-                      {isMobileScreen ? 'Mobile Phone' : 'Laptop / Desktop'}
+                  <div className="onboarding-live-preview" style={{ width: '100%', justifyContent: 'flex-start' }}>
+                    {renderAvatarBadge(onboardingAvatar, undefined, 28, 56)}
+                    <div style={{ minWidth: 0, marginLeft: '0.75rem' }}>
+                      <div style={{ fontWeight: 700, fontSize: '1.05rem' }}>
+                        {onboardingName.trim() || 'My Device'}
+                      </div>
+                      <div style={{ fontSize: '0.76rem', color: 'var(--text-tertiary)' }}>
+                        {isMobileScreen ? 'Mobile Phone' : 'Laptop / Desktop'}
+                      </div>
                     </div>
                   </div>
                 </div>
 
-                <MuiTextField
-                  label="Device Display Name"
-                  value={onboardingName}
-                  maxLength={24}
-                  placeholder="e.g. My MacBook, Tonderai's Phone"
-                  onChange={(val) => setOnboardingName(val)}
-                  icon="badge"
-                  autoFocus
-                  helperText="Nearby peers will identify you by this name. Zero data is stored in the cloud."
-                />
+                <div className="onboarding-split-content">
+                  <MuiTextField
+                    label="Device Display Name"
+                    value={onboardingName}
+                    maxLength={24}
+                    placeholder="e.g. My MacBook, Tonderai's Phone"
+                    onChange={(val) => setOnboardingName(val)}
+                    icon="badge"
+                    autoFocus
+                    helperText="Visible to nearby devices. Zero data is collected."
+                  />
 
-                <div style={{ marginBottom: '1.25rem' }}>
-                  <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>
-                    Select Device Icon
-                  </label>
-                  <div className="avatar-picker-grid">
-                    {AVATAR_LIST.map((av) => (
-                      <button
-                        key={av.id}
-                        type="button"
-                        className={`avatar-option-btn ${onboardingAvatar === av.id ? 'selected' : ''}`}
-                        onClick={() => setOnboardingAvatar(av.id)}
-                        title={av.label}
-                      >
-                        <div style={{ color: av.color }}>{renderAvatarIcon(av.id, undefined, 20)}</div>
-                        <span className="avatar-option-label">{av.label}</span>
-                      </button>
-                    ))}
+                  <div style={{ marginBottom: '1.25rem', marginTop: '0.5rem' }}>
+                    <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>
+                      Select Device Icon
+                    </label>
+                    <div className="avatar-picker-grid">
+                      {AVATAR_LIST.map((av) => (
+                        <button
+                          key={av.id}
+                          type="button"
+                          className={`avatar-option-btn ${onboardingAvatar === av.id ? 'selected' : ''}`}
+                          onClick={() => setOnboardingAvatar(av.id)}
+                          title={av.label}
+                        >
+                          <div style={{ color: av.color }}>{renderAvatarIcon(av.id, undefined, 20)}</div>
+                          <span className="avatar-option-label">{av.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="onboarding-actions">
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => setOnboardingStep('splash')}
+                    >
+                      <ArrowLeft size={14} /> Back
+                    </button>
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => {
+                        if (!onboardingName.trim()) {
+                          setOnboardingName(initialIdentity.name);
+                        }
+                        setOnboardingStep('agree');
+                      }}
+                    >
+                      Continue <ArrowRight size={14} />
+                    </button>
                   </div>
                 </div>
-
-                <div className="onboarding-actions">
-                  <button
-                    className="btn btn-secondary"
-                    onClick={() => setOnboardingStep('splash')}
-                  >
-                    <ArrowLeft size={14} /> Back
-                  </button>
-                  <button
-                    className="btn btn-primary"
-                    onClick={() => {
-                      if (!onboardingName.trim()) {
-                        setOnboardingName(initialIdentity.name);
-                      }
-                      setOnboardingStep('agree');
-                    }}
-                  >
-                    Continue <ArrowRight size={14} />
-                  </button>
-                </div>
-              </>
+              </div>
             )}
 
             {onboardingStep === 'agree' && (
-              <>
-                <div className="onboarding-step-label">Step 2 of 3 • Local Network</div>
-                <h2 id="onboarding-title" style={{ fontSize: '1.25rem', fontWeight: 800, textAlign: 'center', marginBottom: '0.35rem' }}>
-                  Local Network Sharing
-                </h2>
-                <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', textAlign: 'center', marginBottom: '1.2rem' }}>
-                  Quick overview of how peer transfers operate on your device.
-                </p>
-
-                <div className="agreement-card">
-                  <div className="agreement-item">
-                    <CheckCircle2 size={16} color="var(--status-online)" style={{ flexShrink: 0, marginTop: 2 }} />
-                    <div>
-                      <strong style={{ color: 'var(--text-primary)' }}>Direct Device-to-Device:</strong> Transfers stream directly over WebRTC or local Wi-Fi. Files never upload to any cloud storage.
-                    </div>
-                  </div>
-                  <div className="agreement-item">
-                    <CheckCircle2 size={16} color="var(--status-online)" style={{ flexShrink: 0, marginTop: 2 }} />
-                    <div>
-                      <strong style={{ color: 'var(--text-primary)' }}>Room Isolation:</strong> You only see and share with devices sharing your Room Code (default is GLOBAL).
-                    </div>
-                  </div>
-                  <div className="agreement-item">
-                    <CheckCircle2 size={16} color="var(--status-online)" style={{ flexShrink: 0, marginTop: 2 }} />
-                    <div>
-                      <strong style={{ color: 'var(--text-primary)' }}>Safe & Controlled:</strong> You can pause Auto-Send or Auto-Accept at any time in preferences.
-                    </div>
+              <div className="onboarding-split-layout">
+                <div className="onboarding-split-hero">
+                  <div className="onboarding-step-label">Step 2 of 3 • Local Network</div>
+                  <h2 style={{ fontSize: '1.75rem', fontWeight: 800, marginBottom: '0.45rem' }}>
+                    Local & Encrypted
+                  </h2>
+                  <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
+                    All files stream directly between devices. Zero servers, zero telemetry.
+                  </p>
+                  <div className="security-pill" style={{ pointerEvents: 'none', padding: '0.55rem 1rem' }}>
+                    <MuiIcon name="verified_user" size={18} />
+                    <span>DTLS-SRTP 256-Bit Encrypted</span>
                   </div>
                 </div>
 
-                <label className="agreement-checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={agreeTerms}
-                    onChange={(e) => setAgreeTerms(e.target.checked)}
-                  />
-                  <span className="agreement-checkbox-text">
-                    I agree to enable local peer-to-peer sharing on this device.
-                  </span>
-                </label>
+                <div className="onboarding-split-content">
+                  <div className="agreement-card">
+                    <div className="agreement-item">
+                      <CheckCircle2 size={16} color="var(--status-online)" style={{ flexShrink: 0, marginTop: 2 }} />
+                      <div>
+                        <strong style={{ color: 'var(--text-primary)' }}>Direct Device-to-Device:</strong> Transfers stream directly over WebRTC or local Wi-Fi. Files never upload to any cloud storage.
+                      </div>
+                    </div>
+                    <div className="agreement-item">
+                      <CheckCircle2 size={16} color="var(--status-online)" style={{ flexShrink: 0, marginTop: 2 }} />
+                      <div>
+                        <strong style={{ color: 'var(--text-primary)' }}>Room Isolation:</strong> You choose between Public Room (GLOBAL) or encrypted Privacy Rooms with unique keys.
+                      </div>
+                    </div>
+                    <div className="agreement-item">
+                      <CheckCircle2 size={16} color="var(--status-online)" style={{ flexShrink: 0, marginTop: 2 }} />
+                      <div>
+                        <strong style={{ color: 'var(--text-primary)' }}>Safe & Controlled:</strong> You can pause Auto-Send or Auto-Accept at any time in preferences.
+                      </div>
+                    </div>
+                  </div>
 
-                <div className="onboarding-actions">
-                  <button
-                    className="btn btn-secondary"
-                    onClick={() => setOnboardingStep('profile')}
-                  >
-                    <ArrowLeft size={14} /> Back
-                  </button>
-                  <button
-                    className="btn btn-primary"
-                    disabled={!agreeTerms}
-                    onClick={() => setOnboardingStep('save')}
-                    title={!agreeTerms ? 'Please check the agreement box to continue' : 'Continue'}
-                  >
-                    Continue <ArrowRight size={14} />
-                  </button>
+                  <label className="agreement-checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={agreeTerms}
+                      onChange={(e) => setAgreeTerms(e.target.checked)}
+                    />
+                    <span className="agreement-checkbox-text">
+                      I agree to enable local peer-to-peer sharing on this device.
+                    </span>
+                  </label>
+
+                  <div className="onboarding-actions">
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => setOnboardingStep('profile')}
+                    >
+                      <ArrowLeft size={14} /> Back
+                    </button>
+                    <button
+                      className="btn btn-primary"
+                      disabled={!agreeTerms}
+                      onClick={() => setOnboardingStep('save')}
+                      title={!agreeTerms ? 'Please check the agreement box to continue' : 'Continue'}
+                    >
+                      Continue <ArrowRight size={14} />
+                    </button>
+                  </div>
                 </div>
-              </>
+              </div>
             )}
 
             {onboardingStep === 'save' && (
-              <>
-                <div className="onboarding-step-label">Step 3 of 3 • Confirmation</div>
-                <h2 id="onboarding-title" style={{ fontSize: '1.25rem', fontWeight: 800, textAlign: 'center', marginBottom: '0.35rem' }}>
-                  You're All Set!
-                </h2>
-                <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', textAlign: 'center', marginBottom: '1.2rem' }}>
-                  Review your sharing profile before starting.
-                </p>
-
-                <div className="save-summary-card">
-                  {renderAvatarBadge(onboardingAvatar, undefined, 30, 64)}
-                  <div style={{ fontSize: '1.1rem', fontWeight: 800 }}>
-                    {onboardingName.trim() || initialIdentity.name}
-                  </div>
-                  <div className="room-active-pill" style={{ margin: 0 }}>
-                    <span className="status-dot online" /> Ready in Room: <strong>{roomCode}</strong>
-                  </div>
-                  <p style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', marginTop: '0.25rem', maxWidth: 300 }}>
-                    You can change your name or icon at any time in the Room or Settings tab.
+              <div className="onboarding-split-layout">
+                <div className="onboarding-split-hero">
+                  <div className="onboarding-step-label">Step 3 of 3 • Confirmation</div>
+                  <h2 style={{ fontSize: '1.75rem', fontWeight: 800, marginBottom: '0.45rem' }}>
+                    You're All Set!
+                  </h2>
+                  <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)' }}>
+                    Your device is configured and ready to transfer files at maximum network speed.
                   </p>
                 </div>
 
-                <div className="onboarding-actions">
-                  <button
-                    className="btn btn-secondary"
-                    onClick={() => setOnboardingStep('agree')}
-                  >
-                    <ArrowLeft size={14} /> Back
-                  </button>
-                  <button
-                    className="btn btn-primary"
-                    style={{ flex: 1, justifyContent: 'center', padding: '0.65rem 1rem' }}
-                    onClick={handleCompleteOnboarding}
-                  >
-                    <CheckCircle2 size={16} /> Save & Start Sharing
-                  </button>
+                <div className="onboarding-split-content">
+                  <div className="save-summary-card">
+                    {renderAvatarBadge(onboardingAvatar, undefined, 32, 68)}
+                    <div style={{ fontSize: '1.25rem', fontWeight: 800 }}>
+                      {onboardingName.trim() || initialIdentity.name}
+                    </div>
+                    <div className="room-active-pill" style={{ margin: 0 }}>
+                      <span className="status-dot online" /> Active in Room: <strong>{roomCode}</strong>
+                    </div>
+                    <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                      You can change your name or icon at any time in the Room or Settings tab.
+                    </p>
+                  </div>
+
+                  <div className="onboarding-actions">
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => setOnboardingStep('agree')}
+                    >
+                      <ArrowLeft size={14} /> Back
+                    </button>
+                    <button
+                      className="btn btn-primary"
+                      style={{ flex: 1, justifyContent: 'center', padding: '0.75rem 1.25rem' }}
+                      onClick={handleCompleteOnboarding}
+                    >
+                      <CheckCircle2 size={16} /> Save & Start Sharing
+                    </button>
+                  </div>
                 </div>
-              </>
+              </div>
             )}
           </div>
         </div>
