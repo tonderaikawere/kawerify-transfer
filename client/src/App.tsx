@@ -22,7 +22,20 @@ import {
   Volume2,
   VolumeX,
   ArrowDown,
-  ArrowUp
+  ArrowUp,
+  Laptop,
+  Smartphone,
+  Rocket,
+  Zap,
+  Shield,
+  Gamepad2,
+  Sparkles,
+  Compass,
+  Cpu,
+  CheckCircle2,
+  ShieldCheck,
+  ArrowRight,
+  ArrowLeft
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import mqtt from 'mqtt';
@@ -86,18 +99,72 @@ const RTC_CONFIG: RTCConfiguration = {
   iceCandidatePoolSize: 10
 };
 
-const AVATAR_LIST = [
-  { id: 1, label: 'Laptop', icon: '💻' },
-  { id: 2, label: 'Phone', icon: '📱' },
-  { id: 3, label: 'Rocket', icon: '🚀' },
-  { id: 4, label: 'Lightning', icon: '⚡' },
-  { id: 5, label: 'Cat', icon: '🐱' },
-  { id: 6, label: 'Fox', icon: '🦊' },
-  { id: 7, label: 'Lion', icon: '🦁' },
-  { id: 8, label: 'Panda', icon: '🐼' },
-  { id: 9, label: 'Gamepad', icon: '🎮' },
-  { id: 10, label: 'Shield', icon: '🛡️' }
+export interface AvatarItem {
+  id: number;
+  label: string;
+  iconName: 'Laptop' | 'Smartphone' | 'Rocket' | 'Zap' | 'Shield' | 'Gamepad2' | 'Sparkles' | 'Compass' | 'Cpu' | 'User';
+  bg: string;
+  color: string;
+}
+
+const AVATAR_LIST: AvatarItem[] = [
+  { id: 1, label: 'Laptop', iconName: 'Laptop', bg: 'rgba(59, 130, 246, 0.15)', color: '#3b82f6' },
+  { id: 2, label: 'Phone', iconName: 'Smartphone', bg: 'rgba(16, 185, 129, 0.15)', color: '#10b981' },
+  { id: 3, label: 'Rocket', iconName: 'Rocket', bg: 'rgba(249, 115, 22, 0.15)', color: '#f97316' },
+  { id: 4, label: 'Lightning', iconName: 'Zap', bg: 'rgba(234, 179, 8, 0.18)', color: '#eab308' },
+  { id: 5, label: 'Shield', iconName: 'Shield', bg: 'rgba(99, 102, 241, 0.15)', color: '#6366f1' },
+  { id: 6, label: 'Gamepad', iconName: 'Gamepad2', bg: 'rgba(236, 72, 153, 0.15)', color: '#ec4899' },
+  { id: 7, label: 'Sparkles', iconName: 'Sparkles', bg: 'rgba(168, 85, 247, 0.15)', color: '#a855f7' },
+  { id: 8, label: 'Compass', iconName: 'Compass', bg: 'rgba(14, 165, 233, 0.15)', color: '#0ea5e9' },
+  { id: 9, label: 'CPU', iconName: 'Cpu', bg: 'rgba(20, 184, 166, 0.15)', color: '#14b8a6' },
+  { id: 10, label: 'User', iconName: 'User', bg: 'rgba(100, 116, 139, 0.15)', color: '#64748b' }
 ];
+
+const renderAvatarIcon = (avatarId?: number, fallbackDeviceType?: string, size = 18) => {
+  const item = AVATAR_LIST.find(a => a.id === avatarId);
+  const iconName = item?.iconName || (fallbackDeviceType && /mobile|phone|android|iphone/i.test(fallbackDeviceType) ? 'Smartphone' : 'Laptop');
+
+  switch (iconName) {
+    case 'Smartphone':
+      return <Smartphone size={size} />;
+    case 'Rocket':
+      return <Rocket size={size} />;
+    case 'Zap':
+      return <Zap size={size} />;
+    case 'Shield':
+      return <Shield size={size} />;
+    case 'Gamepad2':
+      return <Gamepad2 size={size} />;
+    case 'Sparkles':
+      return <Sparkles size={size} />;
+    case 'Compass':
+      return <Compass size={size} />;
+    case 'Cpu':
+      return <Cpu size={size} />;
+    case 'User':
+      return <User size={size} />;
+    case 'Laptop':
+    default:
+      return <Laptop size={size} />;
+  }
+};
+
+const renderAvatarBadge = (avatarId?: number, fallbackDeviceType?: string, size = 18, badgeSize = 36) => {
+  const item = AVATAR_LIST.find(a => a.id === avatarId) || (fallbackDeviceType && /mobile|phone|android|iphone/i.test(fallbackDeviceType) ? AVATAR_LIST[1] : AVATAR_LIST[0]);
+  return (
+    <div
+      className="avatar-vector-badge"
+      style={{
+        width: badgeSize,
+        height: badgeSize,
+        backgroundColor: item.bg,
+        color: item.color,
+      }}
+    >
+      {renderAvatarIcon(avatarId, fallbackDeviceType, size)}
+    </div>
+  );
+};
 
 function createLocalIdentity(): Peer {
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -200,6 +267,18 @@ export default function App() {
   const [customName, setCustomName] = useState<string>(initialIdentity.name);
   const [selectedAvatar, setSelectedAvatar] = useState<number>(initialIdentity.avatar);
   const [isEditingName, setIsEditingName] = useState<boolean>(false);
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(() => {
+    return localStorage.getItem('kawerify_onboarded') !== 'true';
+  });
+  const [onboardingStep, setOnboardingStep] = useState<'splash' | 'profile' | 'agree' | 'save'>('splash');
+  const [onboardingName, setOnboardingName] = useState<string>(() => {
+    return localStorage.getItem('kawerify_custom_name') || initialIdentity.name;
+  });
+  const [onboardingAvatar, setOnboardingAvatar] = useState<number>(() => {
+    const saved = localStorage.getItem('kawerify_custom_avatar');
+    return saved ? parseInt(saved, 10) : initialIdentity.avatar;
+  });
+  const [agreeTerms, setAgreeTerms] = useState<boolean>(false);
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(() => {
     return localStorage.getItem('kawerify_voice_enabled') !== 'false';
   });
@@ -384,7 +463,7 @@ export default function App() {
   }, []);
 
   const announcePeerJoined = useCallback((peerName: string) => {
-    showToast(`👋 ${peerName} joined the room`);
+    showToast(`${peerName} joined the room`);
     if (voiceEnabled && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
@@ -1501,7 +1580,7 @@ export default function App() {
       }));
     }
     sendP2PSignal('broadcast', { type: 'presence', senderName: raw, avatar: avatarVal });
-    showToast(`✅ Name saved as "${raw}"`);
+    showToast(`Name saved as "${raw}"`);
   };
 
   const handleJoinRoom = (codeToJoin?: string) => {
@@ -1515,7 +1594,7 @@ export default function App() {
     sendP2PSignal('broadcast', { type: 'presence', roomCode: clean, senderName: me.name, avatar: me.avatar });
     sendP2PSignal('broadcast', { type: 'presence-request', roomCode: clean });
     
-    showToast(`✅ Joined room: ${clean}`);
+    showToast(`Joined room: ${clean}`);
     if (voiceEnabled && 'speechSynthesis' in window) {
       try {
         const u = new SpeechSynthesisUtterance(`Joined room ${clean}`);
@@ -1869,9 +1948,15 @@ export default function App() {
   };
 
   const renderAvatarEmoji = (avatarId?: number, fallbackDeviceType?: string) => {
-    const found = AVATAR_LIST.find(a => a.id === avatarId);
-    if (found) return found.icon;
-    return fallbackDeviceType && /mobile|phone|android|iphone/i.test(fallbackDeviceType) ? '📱' : '💻';
+    return renderAvatarBadge(avatarId, fallbackDeviceType, 16, 28);
+  };
+
+  const handleCompleteOnboarding = () => {
+    const finalName = (onboardingName.trim() || initialIdentity.name).substring(0, 24);
+    localStorage.setItem('kawerify_onboarded', 'true');
+    handleRename(finalName, onboardingAvatar);
+    setShowOnboarding(false);
+    showToast(`Profile saved! Welcome ${finalName}.`);
   };
 
   const isSystemOnline = wsConnected || p2pConnected;
@@ -1993,8 +2078,8 @@ export default function App() {
         {/* This Device in the Room */}
         <div className="peer-card selected" style={{ borderLeft: '3px solid var(--accent-primary)', marginBottom: '0.65rem' }}>
           <div className="peer-card-left" style={{ flex: 1, minWidth: 0 }}>
-            <div className="peer-icon-box" style={{ background: 'var(--accent-primary-soft)', color: 'var(--accent-primary)', fontSize: '1.25rem' }}>
-              {renderAvatarEmoji(me.avatar, me.deviceType)}
+            <div className="peer-icon-box" style={{ background: 'transparent' }}>
+              {renderAvatarBadge(me.avatar, me.deviceType, 18, 38)}
             </div>
             <div style={{ minWidth: 0, flex: 1 }}>
               <div className="peer-card-name" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
@@ -2065,7 +2150,8 @@ export default function App() {
                     }}
                     title={av.label}
                   >
-                    {av.icon}
+                    <div style={{ color: av.color }}>{renderAvatarIcon(av.id, undefined, 20)}</div>
+                    <span className="avatar-option-label">{av.label}</span>
                   </button>
                 ))}
               </div>
@@ -2091,8 +2177,8 @@ export default function App() {
                       <div className="peer-checkbox">
                         <Check size={12} strokeWidth={3} />
                       </div>
-                      <div className="peer-icon-box" style={{ fontSize: '1.25rem' }}>
-                        {renderAvatarEmoji(peer.avatar, peer.deviceType)}
+                      <div className="peer-icon-box" style={{ background: 'transparent' }}>
+                        {renderAvatarBadge(peer.avatar, peer.deviceType, 18, 36)}
                       </div>
                       <div style={{ minWidth: 0 }}>
                         <div className="peer-card-name" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
@@ -2200,11 +2286,11 @@ export default function App() {
             style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 999 }}
             onClick={() => {
               setAutoSend(prev => !prev);
-              showToast(!autoSend ? '⚡ Auto-Send enabled: files stream immediately upon drop/select' : 'Auto-Send paused');
+              showToast(!autoSend ? 'Auto-Send enabled: files stream immediately upon drop/select' : 'Auto-Send paused');
             }}
             title="Automatically send files as soon as they are added"
           >
-            ⚡ Auto-Send: {autoSend ? 'ON' : 'OFF'}
+            <><Zap size={13} style={{ verticalAlign: 'middle', marginRight: 4 }} /> Auto-Send: {autoSend ? 'ON' : 'OFF'}</>
           </button>
           <button
             type="button"
@@ -2212,11 +2298,11 @@ export default function App() {
             style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 999 }}
             onClick={() => {
               setAutoAccept(prev => !prev);
-              showToast(!autoAccept ? '🛡️ Auto-Accept enabled: incoming files save automatically' : 'Auto-Accept paused');
+              showToast(!autoAccept ? 'Auto-Accept enabled: incoming files save automatically' : 'Auto-Accept paused');
             }}
             title="Automatically accept and save incoming files without prompt"
           >
-            🛡️ Auto-Accept: {autoAccept ? 'ON' : 'OFF'}
+            <><ShieldCheck size={13} style={{ verticalAlign: 'middle', marginRight: 4 }} /> Auto-Accept: {autoAccept ? 'ON' : 'OFF'}</>
           </button>
         </div>
       </div>
@@ -2287,7 +2373,7 @@ export default function App() {
             </div>
             <div className="dropzone-hint">
               {autoSend
-                ? `⚡ Auto-Send is ON: files stream directly to everyone in Room ${roomCode} without waiting`
+                ? `Auto-Send is ON: files stream directly to everyone in Room ${roomCode} without waiting`
                 : 'Fast bit-for-bit uncompressed transfer with background keep-alive'}
             </div>
             <div
@@ -2386,7 +2472,7 @@ export default function App() {
             <div className="recipient-chips">
               {selectedPeersList.map(peer => (
                 <span key={peer.id} className="recipient-chip">
-                  <span>{renderAvatarEmoji(peer.avatar, peer.deviceType)}</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center' }}>{renderAvatarIcon(peer.avatar, peer.deviceType, 13)}</span>
                   <span>{peer.name}</span>
                   <button
                     onClick={() => togglePeerSelection(peer.id)}
@@ -2614,21 +2700,22 @@ export default function App() {
               Select Avatar:
             </div>
             <div className="avatar-picker-grid">
-              {AVATAR_LIST.map((av) => (
-                <button
-                  key={av.id}
-                  type="button"
-                  className={`avatar-option-btn ${selectedAvatar === av.id ? 'selected' : ''}`}
-                  onClick={() => {
-                    setSelectedAvatar(av.id);
-                    handleRename(customName, av.id);
-                  }}
-                  title={av.label}
-                >
-                  {av.icon}
-                </button>
-              ))}
-            </div>
+                {AVATAR_LIST.map((av) => (
+                  <button
+                    key={av.id}
+                    type="button"
+                    className={`avatar-option-btn ${selectedAvatar === av.id ? 'selected' : ''}`}
+                    onClick={() => {
+                      setSelectedAvatar(av.id);
+                      handleRename(customName, av.id);
+                    }}
+                    title={av.label}
+                  >
+                    <div style={{ color: av.color }}>{renderAvatarIcon(av.id, undefined, 20)}</div>
+                    <span className="avatar-option-label">{av.label}</span>
+                  </button>
+                ))}
+              </div>
           </div>
         </div>
       </section>
@@ -2642,7 +2729,7 @@ export default function App() {
         <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <div style={{ fontSize: '0.88rem', fontWeight: 600 }}>⚡ Auto-Send</div>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.88rem', fontWeight: 600 }}><Zap size={15} /> Auto-Send</div>
               <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>Immediately send files when picked without clicking Send</div>
             </div>
             <button
@@ -2651,7 +2738,7 @@ export default function App() {
               onClick={() => {
                 const next = !autoSend;
                 setAutoSend(next);
-                showToast(next ? '⚡ Auto-Send enabled' : 'Auto-Send disabled');
+                showToast(next ? 'Auto-Send enabled' : 'Auto-Send disabled');
               }}
             >
               {autoSend ? 'ON' : 'OFF'}
@@ -2660,7 +2747,7 @@ export default function App() {
 
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <div style={{ fontSize: '0.88rem', fontWeight: 600 }}>🛡️ Auto-Accept</div>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.88rem', fontWeight: 600 }}><ShieldCheck size={15} /> Auto-Accept</div>
               <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>Automatically accept and save incoming files</div>
             </div>
             <button
@@ -2669,7 +2756,7 @@ export default function App() {
               onClick={() => {
                 const next = !autoAccept;
                 setAutoAccept(next);
-                showToast(next ? '🛡️ Auto-Accept enabled' : 'Auto-Accept disabled');
+                showToast(next ? 'Auto-Accept enabled' : 'Auto-Accept disabled');
               }}
             >
               {autoAccept ? 'ON' : 'OFF'}
@@ -2678,7 +2765,7 @@ export default function App() {
 
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <div style={{ fontSize: '0.88rem', fontWeight: 600 }}>🔊 Voice Announcements</div>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.88rem', fontWeight: 600 }}><Volume2 size={15} /> Voice Announcements</div>
               <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>Utters "[Name] joined" when peers connect</div>
             </div>
             <button
@@ -2687,7 +2774,7 @@ export default function App() {
               onClick={() => {
                 const next = !voiceEnabled;
                 setVoiceEnabled(next);
-                showToast(next ? '🔊 Voice announcements ON' : '🔇 Voice announcements OFF');
+                showToast(next ? 'Voice announcements ON' : 'Voice announcements muted');
               }}
             >
               {voiceEnabled ? 'ON' : 'OFF'}
@@ -2696,7 +2783,7 @@ export default function App() {
 
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <div style={{ fontSize: '0.88rem', fontWeight: 600 }}>🌓 Appearance</div>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.88rem', fontWeight: 600 }}><Sun size={15} /> Appearance</div>
               <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>Toggle dark / light display theme</div>
             </div>
             <button
@@ -2727,6 +2814,21 @@ export default function App() {
           </a>
 
           <div className="topbar-actions">
+            <button
+              className="btn btn-sm btn-secondary"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', padding: '0.2rem 0.55rem' }}
+              onClick={() => {
+                if (isMobileScreen) setMobileTab('me');
+                else setIsEditingName(prev => !prev);
+              }}
+              title="My Device Profile"
+            >
+              {renderAvatarBadge(me.avatar, me.deviceType, 13, 20)}
+              <span style={{ fontWeight: 600, fontSize: '0.78rem', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {me.name}
+              </span>
+            </button>
+
             <div className="room-active-pill" title={`Joined room: ${roomCode}`}>
               <span className="status-dot online" />
               <span>{roomCode}</span>
@@ -2748,7 +2850,7 @@ export default function App() {
               onClick={() => {
                 const next = !voiceEnabled;
                 setVoiceEnabled(next);
-                showToast(next ? '🔊 Voice announcements ON' : '🔇 Voice announcements muted');
+                showToast(next ? 'Voice announcements ON' : 'Voice announcements muted');
               }}
               title={voiceEnabled ? 'Mute voice announcements' : 'Enable voice announcements'}
               aria-label="Toggle voice announcements"
@@ -2935,6 +3037,258 @@ export default function App() {
                 </>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* First-time Onboarding & Splashscreen Modal */}
+      {showOnboarding && (
+        <div className="onboarding-overlay" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+          <div className="onboarding-card">
+            <div className="onboarding-stepper">
+              <div className={`onboarding-step-dot ${onboardingStep === 'splash' ? 'active' : 'completed'}`} />
+              <div className={`onboarding-step-dot ${onboardingStep === 'profile' ? 'active' : onboardingStep === 'agree' || onboardingStep === 'save' ? 'completed' : ''}`} />
+              <div className={`onboarding-step-dot ${onboardingStep === 'agree' ? 'active' : onboardingStep === 'save' ? 'completed' : ''}`} />
+              <div className={`onboarding-step-dot ${onboardingStep === 'save' ? 'active' : ''}`} />
+            </div>
+
+            {onboardingStep === 'splash' && (
+              <>
+                <div className="splash-hero">
+                  <div className="splash-logo-wrap">
+                    <Zap size={36} />
+                  </div>
+                  <h1 id="onboarding-title" className="splash-title">Kawerify Transfer</h1>
+                  <p className="splash-desc">
+                    Fast, private, direct peer-to-peer file sharing between laptops and phones. No cloud required.
+                  </p>
+                </div>
+
+                <div className="splash-features">
+                  <div className="splash-feature-item">
+                    <div className="splash-feature-icon" style={{ backgroundColor: 'rgba(59, 130, 246, 0.15)', color: '#3b82f6' }}>
+                      <Zap size={18} />
+                    </div>
+                    <div>
+                      <div className="splash-feature-title">Maximum Local Speed</div>
+                      <div className="splash-feature-text">Streams directly over Wi-Fi or WebRTC mesh at full hardware speed.</div>
+                    </div>
+                  </div>
+
+                  <div className="splash-feature-item">
+                    <div className="splash-feature-icon" style={{ backgroundColor: 'rgba(16, 185, 129, 0.15)', color: '#10b981' }}>
+                      <ShieldCheck size={18} />
+                    </div>
+                    <div>
+                      <div className="splash-feature-title">100% Private & Direct</div>
+                      <div className="splash-feature-text">Zero server storage. Files stream directly from sender to receiver.</div>
+                    </div>
+                  </div>
+
+                  <div className="splash-feature-item">
+                    <div className="splash-feature-icon" style={{ backgroundColor: 'rgba(249, 115, 22, 0.15)', color: '#f97316' }}>
+                      <HardDrive size={18} />
+                    </div>
+                    <div>
+                      <div className="splash-feature-title">Large Files & Batches</div>
+                      <div className="splash-feature-text">Share 100+ files or multi-gigabyte videos without compression or limits.</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="onboarding-actions" style={{ justifyContent: 'flex-end' }}>
+                  <button
+                    className="btn btn-primary"
+                    style={{ width: '100%', justifyContent: 'center', padding: '0.75rem 1rem', fontSize: '0.95rem' }}
+                    onClick={() => setOnboardingStep('profile')}
+                  >
+                    Get Started <ArrowRight size={16} />
+                  </button>
+                </div>
+              </>
+            )}
+
+            {onboardingStep === 'profile' && (
+              <>
+                <div className="onboarding-step-label">Step 1 of 3 • Profile Setup</div>
+                <h2 id="onboarding-title" style={{ fontSize: '1.25rem', fontWeight: 800, textAlign: 'center', marginBottom: '0.35rem' }}>
+                  Set Device Name & Icon
+                </h2>
+                <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', textAlign: 'center', marginBottom: '1.2rem' }}>
+                  This is how nearby laptops and phones will discover your device.
+                </p>
+
+                <div className="onboarding-live-preview">
+                  {renderAvatarBadge(onboardingAvatar, undefined, 24, 52)}
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>
+                      {onboardingName.trim() || 'My Device'}
+                    </div>
+                    <div style={{ fontSize: '0.74rem', color: 'var(--text-tertiary)' }}>
+                      {isMobileScreen ? 'Mobile Phone' : 'Laptop / Desktop'}
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: '1rem' }}>
+                  <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
+                    Device Display Name
+                  </label>
+                  <input
+                    type="text"
+                    className="text-input"
+                    value={onboardingName}
+                    maxLength={24}
+                    placeholder="e.g. My Laptop, Living Room PC"
+                    onChange={(e) => setOnboardingName(e.target.value)}
+                    style={{ width: '100%' }}
+                    autoFocus
+                  />
+                </div>
+
+                <div style={{ marginBottom: '1.25rem' }}>
+                  <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>
+                    Select Device Icon
+                  </label>
+                  <div className="avatar-picker-grid">
+                    {AVATAR_LIST.map((av) => (
+                      <button
+                        key={av.id}
+                        type="button"
+                        className={`avatar-option-btn ${onboardingAvatar === av.id ? 'selected' : ''}`}
+                        onClick={() => setOnboardingAvatar(av.id)}
+                        title={av.label}
+                      >
+                        <div style={{ color: av.color }}>{renderAvatarIcon(av.id, undefined, 20)}</div>
+                        <span className="avatar-option-label">{av.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="onboarding-actions">
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => setOnboardingStep('splash')}
+                  >
+                    <ArrowLeft size={14} /> Back
+                  </button>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => {
+                      if (!onboardingName.trim()) {
+                        setOnboardingName(initialIdentity.name);
+                      }
+                      setOnboardingStep('agree');
+                    }}
+                  >
+                    Continue <ArrowRight size={14} />
+                  </button>
+                </div>
+              </>
+            )}
+
+            {onboardingStep === 'agree' && (
+              <>
+                <div className="onboarding-step-label">Step 2 of 3 • Local Network</div>
+                <h2 id="onboarding-title" style={{ fontSize: '1.25rem', fontWeight: 800, textAlign: 'center', marginBottom: '0.35rem' }}>
+                  Local Network Sharing
+                </h2>
+                <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', textAlign: 'center', marginBottom: '1.2rem' }}>
+                  Quick overview of how peer transfers operate on your device.
+                </p>
+
+                <div className="agreement-card">
+                  <div className="agreement-item">
+                    <CheckCircle2 size={16} color="var(--status-online)" style={{ flexShrink: 0, marginTop: 2 }} />
+                    <div>
+                      <strong style={{ color: 'var(--text-primary)' }}>Direct Device-to-Device:</strong> Transfers stream directly over WebRTC or local Wi-Fi. Files never upload to any cloud storage.
+                    </div>
+                  </div>
+                  <div className="agreement-item">
+                    <CheckCircle2 size={16} color="var(--status-online)" style={{ flexShrink: 0, marginTop: 2 }} />
+                    <div>
+                      <strong style={{ color: 'var(--text-primary)' }}>Room Isolation:</strong> You only see and share with devices sharing your Room Code (default is GLOBAL).
+                    </div>
+                  </div>
+                  <div className="agreement-item">
+                    <CheckCircle2 size={16} color="var(--status-online)" style={{ flexShrink: 0, marginTop: 2 }} />
+                    <div>
+                      <strong style={{ color: 'var(--text-primary)' }}>Safe & Controlled:</strong> You can pause Auto-Send or Auto-Accept at any time in preferences.
+                    </div>
+                  </div>
+                </div>
+
+                <label className="agreement-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={agreeTerms}
+                    onChange={(e) => setAgreeTerms(e.target.checked)}
+                  />
+                  <span className="agreement-checkbox-text">
+                    I agree to enable local peer-to-peer sharing on this device.
+                  </span>
+                </label>
+
+                <div className="onboarding-actions">
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => setOnboardingStep('profile')}
+                  >
+                    <ArrowLeft size={14} /> Back
+                  </button>
+                  <button
+                    className="btn btn-primary"
+                    disabled={!agreeTerms}
+                    onClick={() => setOnboardingStep('save')}
+                    title={!agreeTerms ? 'Please check the agreement box to continue' : 'Continue'}
+                  >
+                    Continue <ArrowRight size={14} />
+                  </button>
+                </div>
+              </>
+            )}
+
+            {onboardingStep === 'save' && (
+              <>
+                <div className="onboarding-step-label">Step 3 of 3 • Confirmation</div>
+                <h2 id="onboarding-title" style={{ fontSize: '1.25rem', fontWeight: 800, textAlign: 'center', marginBottom: '0.35rem' }}>
+                  You're All Set!
+                </h2>
+                <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', textAlign: 'center', marginBottom: '1.2rem' }}>
+                  Review your sharing profile before starting.
+                </p>
+
+                <div className="save-summary-card">
+                  {renderAvatarBadge(onboardingAvatar, undefined, 30, 64)}
+                  <div style={{ fontSize: '1.1rem', fontWeight: 800 }}>
+                    {onboardingName.trim() || initialIdentity.name}
+                  </div>
+                  <div className="room-active-pill" style={{ margin: 0 }}>
+                    <span className="status-dot online" /> Ready in Room: <strong>{roomCode}</strong>
+                  </div>
+                  <p style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', marginTop: '0.25rem', maxWidth: 300 }}>
+                    You can change your name or icon at any time in the Room or Settings tab.
+                  </p>
+                </div>
+
+                <div className="onboarding-actions">
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => setOnboardingStep('agree')}
+                  >
+                    <ArrowLeft size={14} /> Back
+                  </button>
+                  <button
+                    className="btn btn-primary"
+                    style={{ flex: 1, justifyContent: 'center', padding: '0.65rem 1rem' }}
+                    onClick={handleCompleteOnboarding}
+                  >
+                    <CheckCircle2 size={16} /> Save & Start Sharing
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
