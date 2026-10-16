@@ -20,8 +20,6 @@ import {
   HardDrive,
   Volume2,
   VolumeX,
-  ArrowDown,
-  ArrowUp,
   Zap,
   CheckCircle2,
   ShieldCheck,
@@ -2293,32 +2291,31 @@ export default function App() {
 
       <div className="card-body">
         {/* This Device in the Room */}
-        <div className="peer-card selected" style={{ borderLeft: '3px solid var(--accent-primary)', marginBottom: '0.65rem' }}>
-          <div className="peer-card-left" style={{ flex: 1, minWidth: 0 }}>
+        {/* This Device in the Room */}
+        <div className="my-device-card">
+          <div className="my-device-left">
             <div className="peer-icon-box" style={{ background: 'transparent' }}>
-              {renderAvatarBadge(me.avatar, me.deviceType, 18, 38)}
+              {renderAvatarBadge(me.avatar, me.deviceType, 20, 42)}
             </div>
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div className="peer-card-name" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
-                <span style={{ fontWeight: 700 }}>{me.name}</span>
-                <span className="mono" style={{ fontSize: '0.68rem', padding: '1px 6px', borderRadius: 4, background: 'var(--accent-primary-soft)', color: 'var(--accent-primary)' }}>You</span>
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  style={{ padding: '1px 7px', fontSize: '0.68rem', marginLeft: 'auto' }}
-                  onClick={() => setIsEditingName(prev => !prev)}
-                >
-                  <Edit2 size={11} /> {isEditingName ? 'Close' : 'Edit Name'}
-                </button>
+              <div className="my-device-name-row">
+                <span className="my-device-name">{me.name}</span>
+                <span className="badge-you">You</span>
               </div>
               <div className="peer-card-meta">
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                  <span className="status-dot online" style={{ width: 6, height: 6 }} /> Active in Room {roomCode}
-                </span>
+                <span className="status-dot online" style={{ width: 6, height: 6 }} />
+                <span>Active in {roomCode === 'GLOBAL' ? 'Public Room (GLOBAL)' : `Privacy Key: ${roomCode}`}</span>
               </div>
             </div>
           </div>
-          <span className="transport-tag mono">Your Device</span>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setIsEditingName(prev => !prev)}
+            title="Edit your display name or avatar"
+          >
+            <Edit2 size={12} /> {isEditingName ? 'Close' : 'Edit'}
+          </button>
         </div>
 
         {/* Inline Name & Avatar Customizer like SHAREit */}
@@ -2525,37 +2522,6 @@ export default function App() {
       </div>
 
       <div className="card-body">
-        {/* SHAREit Hero Send & Receive Action Buttons */}
-        <div className="shareit-hero-row">
-          <button
-            type="button"
-            className="shareit-btn shareit-btn-send"
-            onClick={triggerFileInput}
-          >
-            <div className="shareit-btn-icon">
-              <ArrowUp size={26} strokeWidth={2.5} />
-            </div>
-            <div className="shareit-btn-title">SEND</div>
-            <div className="shareit-btn-sub">Pick files or folder</div>
-          </button>
-
-          <button
-            type="button"
-            className="shareit-btn shareit-btn-receive"
-            onClick={() => {
-              if (isMobileScreen) {
-                setMobileTab('room');
-              }
-              showToast(`Ready to receive in Room ${roomCode}. Auto-Accept is ${autoAccept ? 'ON' : 'OFF'}`);
-            }}
-          >
-            <div className="shareit-btn-icon">
-              <ArrowDown size={26} strokeWidth={2.5} />
-            </div>
-            <div className="shareit-btn-title">RECEIVE</div>
-            <div className="shareit-btn-sub">{autoAccept ? 'Auto-Accept: ON' : 'Tap to receive'}</div>
-          </button>
-        </div>
 
         <input
           type="file"
@@ -2594,10 +2560,10 @@ export default function App() {
                 : 'Fast bit-for-bit uncompressed transfer with background keep-alive'}
             </div>
             <div
-              style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap', justifyContent: 'center' }}
+              className="dropzone-actions"
               onClick={(e) => e.stopPropagation()}
             >
-              <button className="btn btn-secondary btn-sm" onClick={triggerFileInput}>
+              <button className="btn btn-primary btn-sm" onClick={triggerFileInput}>
                 <Plus size={14} /> Select Files
               </button>
               <button className="btn btn-secondary btn-sm" onClick={triggerFolderInput}>
